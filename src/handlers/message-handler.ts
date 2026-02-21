@@ -3,7 +3,6 @@
  *
  * 处理接收到的 QQ 消息事件，包含：
  * - 命令解析与分发
- * - CD 冷却管理
  * - 消息发送工具函数
  *
  * 最佳实践：将不同类型的业务逻辑拆分到不同的 handler 文件中，
@@ -15,37 +14,6 @@ import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plu
 import { pluginState } from '../core/state';
 import {getLiveRoomStatusBatch} from "../services/bilibili-service";
 import {storage, Streamer} from "../core/storage";
-
-// ==================== CD 冷却管理 ====================
-/** CD 冷却记录 key: `${groupId}:${command}`, value: 过期时间戳 */
-const cooldownMap = new Map<string, number>();
-
-/**
- * 检查是否在 CD 中
- * @returns 剩余秒数，0 表示可用
- */
-function getCooldownRemaining(groupId: number | string, command: string): number {
-    const cdSeconds = pluginState.config.cooldownSeconds ?? 60;
-    if (cdSeconds <= 0) return 0;
-
-    const key = `${groupId}:${command}`;
-    const expireTime = cooldownMap.get(key);
-    if (!expireTime) return 0;
-
-    const remaining = Math.ceil((expireTime - Date.now()) / 1000);
-    if (remaining <= 0) {
-        cooldownMap.delete(key);
-        return 0;
-    }
-    return remaining;
-}
-
-/** 设置 CD 冷却 */
-function setCooldown(groupId: number | string, command: string): void {
-    const cdSeconds = pluginState.config.cooldownSeconds ?? 60;
-    if (cdSeconds <= 0) return;
-    cooldownMap.set(`${groupId}:${command}`, Date.now() + cdSeconds * 1000);
-}
 
 // ==================== 命令解析 ====================
 
@@ -231,10 +199,18 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
         switch (subCommand) {
             case 'help': {
                 const helpText = [
-                    `[= 插件帮助 =]`,
+                    `[= B站直播订阅插件帮助 =]`,
                     `${COMMAND_PREFIX} help - 显示帮助信息`,
                     `${COMMAND_PREFIX} ping - 测试连通性`,
                     `${COMMAND_PREFIX} status - 查看运行状态`,
+                    ``,
+                    `【订阅管理】`,
+                    `${COMMAND_PREFIX} sub <UID> - 订阅主播(群/私聊)`,
+                    `${COMMAND_PREFIX} unsub <UID> - 取消订阅主播`,
+                    `${COMMAND_PREFIX} list - 查看订阅列表`,
+                    ``,
+                    `【群管理】`,
+                    `${COMMAND_PREFIX} atall on/off - 开启/关闭@全体`,
                 ].join('\n');
                 await sendReply(ctx, event, helpText);
                 break;
@@ -242,7 +218,6 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
 
             case 'ping': {
                 await sendReply(ctx, event, 'pong!');
-                if (messageType === 'group' && groupId) setCooldown(groupId, 'ping');
                 pluginState.incrementProcessed();
                 break;
             }
@@ -257,14 +232,37 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
                 await sendReply(ctx, event, statusText);
                 break;
             }
+
+            case '订阅':
             case 'add':
             case '关注': {
-                await handleAdd(ctx, event, args)
+                await handleSubscribe(ctx, event, args);
+                pluginState.incrementProcessed();
+                break;
+            }
+
+            case 'list':
+            case '列表': {
+                await handleList(ctx, event, args);
+                pluginState.incrementProcessed();
+                break;
+            }
+
+            case 'remove':
+            case '取消订阅': {
+                await handleUnsubscribe(ctx, event, args);
+                pluginState.incrementProcessed();
+                break;
+            }
+
+            case 'atall':
+            case '全体': {
+                await handleAtAll(ctx, event, args);
+                pluginState.incrementProcessed();
                 break;
             }
 
             default: {
-                // TODO: 在这里处理你的主要命令逻辑
                 break;
             }
         }
@@ -277,49 +275,244 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
 // ==================== 业务逻辑 ====================
 
 /**
- * 处理添加订阅
+ * 处理订阅命令
+ * 支持群订阅和用户私聊订阅
  */
-async function handleAdd(
+async function handleSubscribe(
     ctx: NapCatPluginContext,
     event: OB11Message,
     args: string[],
 ): Promise<void> {
     if (args.length === 0) {
-        await sendReply(ctx, event, '用法: #blive add UID');
+        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} sub <UID>\n例如: ${COMMAND_PREFIX} sub 123456`);
         return;
     }
-    // 将字符串数组转换为数字数组，并过滤掉无效的数字
-    const uids = [parseInt(args[0], 10)].filter(uid => !isNaN(uid) && uid > 0);
 
-    if (uids.length === 0) {
+    const uid = parseInt(args[0], 10);
+    if (isNaN(uid) || uid <= 0) {
         await sendReply(ctx, event, '请输入有效的UID');
         return;
     }
-    // 调用B站服务获取直播间状态
-    // 获取直播间状态数据
-    const liveRoomData = await getLiveRoomStatusBatch(uids);
 
-    // 处理响应数据
-    if (liveRoomData.size === 0) {
-        await sendReply(ctx, event, '未找到任何直播间信息');
+    // 检查主播是否已在数据库中
+    let streamer = storage.getStreamer(uid);
+
+    // 如果不在，尝试从B站获取信息
+    if (!streamer) {
+        const liveRoomData = await getLiveRoomStatusBatch([uid]);
+        if (liveRoomData.size === 0) {
+            await sendReply(ctx, event, `未找到UID为 ${uid} 的主播信息`);
+            return;
+        }
+        const roomStatus = Array.from(liveRoomData.values())[0];
+        streamer = {
+            uid: roomStatus.uid,
+            roomId: roomStatus.roomId,
+            uname: roomStatus.uname,
+            liveStatus: roomStatus.liveStatus,
+            liveTime: roomStatus.liveTime,
+            title: roomStatus.title,
+            face: roomStatus.face,
+            cover: roomStatus.cover,
+        };
+        storage.setStreamer(streamer);
+    }
+
+    // 根据消息类型进行订阅
+    if (event.message_type === 'group' && event.group_id) {
+        // 群订阅
+        const groupId = String(event.group_id);
+
+        // 检查权限：只有管理员可以订阅
+        if (!isAdmin(event)) {
+            await sendReply(ctx, event, '只有群主或管理员才能订阅主播');
+            return;
+        }
+
+        const success = storage.subscribeGroup(groupId, uid);
+        if (success) {
+            await sendReply(ctx, event, `群订阅成功\n主播: ${streamer.uname}\nUID: ${uid}\n直播间: https://live.bilibili.com/${streamer.roomId}`);
+        } else {
+            await sendReply(ctx, event, `本群已经订阅了 ${streamer.uname}`);
+        }
+    } else if (event.message_type === 'private' && event.user_id) {
+        // 用户私聊订阅
+        const userId = String(event.user_id);
+        const success = storage.subscribeUser(userId, uid);
+        if (success) {
+            await sendReply(ctx, event, `订阅成功\n主播: ${streamer.uname}\nUID: ${uid}\n直播间: https://live.bilibili.com/${streamer.roomId}`);
+        } else {
+            await sendReply(ctx, event, `您已经订阅了 ${streamer.uname}`);
+        }
+    }
+}
+
+/**
+ * 处理取消订阅命令
+ */
+async function handleUnsubscribe(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    args: string[],
+): Promise<void> {
+    if (args.length === 0) {
+        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} unsub <UID>\n例如: ${COMMAND_PREFIX} unsub 123456`);
         return;
     }
 
-    // 处理单个直播间数据
-    const roomStatus = Array.from(liveRoomData.values())[0];
-    const message = `订阅主播：[${roomStatus.uname}] 成功`;
-    const newStreamer: Streamer = {
-        uid: roomStatus.uid,
-        roomId: roomStatus.roomId,
-        uname: roomStatus.uname,
-        liveStatus: roomStatus.liveStatus, // 未开播
-        liveTime: roomStatus.liveTime,
-        title: roomStatus.title,
-        face: roomStatus.face,
-        cover: roomStatus.cover,
-    };
+    const uid = parseInt(args[0], 10);
+    if (isNaN(uid) || uid <= 0) {
+        await sendReply(ctx, event, '请输入有效的UID');
+        return;
+    }
 
-    storage.setStreamer(newStreamer);
-    console.log(`已添加主播: ${newStreamer.uname}`);
-    await sendReply(ctx, event, message);
+    // 检查主播是否存在
+    const streamer = storage.getStreamer(uid);
+    if (!streamer) {
+        await sendReply(ctx, event, `未找到UID为 ${uid} 的主播`);
+        return;
+    }
+
+    // 根据消息类型进行取消订阅
+    if (event.message_type === 'group' && event.group_id) {
+        // 群取消订阅
+        const groupId = String(event.group_id);
+
+        // 检查权限
+        if (!isAdmin(event)) {
+            await sendReply(ctx, event, '只有群主或管理员才能取消订阅');
+            return;
+        }
+
+        const success = storage.unsubscribeGroup(groupId, uid);
+        if (success) {
+            await sendReply(ctx, event, `已取消订阅\n主播: ${streamer.uname}\nUID: ${uid}`);
+        } else {
+            await sendReply(ctx, event, `本群没有订阅 ${streamer.uname}`);
+        }
+    } else if (event.message_type === 'private' && event.user_id) {
+        // 用户取消订阅
+        const userId = String(event.user_id);
+        const success = storage.unsubscribeUser(userId, uid);
+        if (success) {
+            await sendReply(ctx, event, `已取消订阅\n主播: ${streamer.uname}\nUID: ${uid}`);
+        } else {
+            await sendReply(ctx, event, `您没有订阅 ${streamer.uname}`);
+        }
+    }
+}
+
+/**
+ * 处理查看订阅列表命令
+ */
+async function handleList(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    args: string[],
+): Promise<void> {
+    const showAll = args.includes('all') || args.includes('全部');
+
+    if (event.message_type === 'group' && event.group_id) {
+        // 群订阅列表
+        const groupId = String(event.group_id);
+        const streamers = storage.getGroupSubscribedStreamers(groupId);
+        const groupSub = storage.getGroupSub(groupId);
+
+        if (streamers.length === 0) {
+            await sendReply(ctx, event, '本群还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅');
+            return;
+        }
+
+        const lines = [
+            `[= 本群订阅列表 =]`,
+            `共 ${streamers.length} 个主播`,
+            ``,
+        ];
+
+        for (let i = 0; i < streamers.length; i++) {
+            const s = streamers[i];
+            const status = s.liveStatus === 1 ? '🔴 直播中' : s.liveStatus === 2 ? '⏺️ 轮播中' : '⚫ 未开播';
+            lines.push(`${i + 1}. ${s.uname}`);
+            lines.push(`   UID: ${s.uid} | ${status}`);
+            if (s.liveStatus === 1 && s.liveTime > 0) {
+                const liveDuration = Math.floor((Date.now() / 1000 - s.liveTime) / 60);
+                lines.push(`   已开播: ${liveDuration} 分钟`);
+            }
+            lines.push(`   https://live.bilibili.com/${s.roomId}`);
+            lines.push('');
+        }
+
+        // 添加群设置信息
+        if (groupSub) {
+            lines.push(`[群设置]`);
+            lines.push(`@全体: ${groupSub.enableAtAll ? '开启' : '关闭'}`);
+            lines.push(`推送: ${groupSub.enabled ? '开启' : '关闭'}`);
+        }
+
+        await sendReply(ctx, event, lines.join('\n'));
+
+    } else if (event.message_type === 'private' && event.user_id) {
+        // 用户个人订阅列表
+        const userId = String(event.user_id);
+        const streamers = storage.getUserSubscribedStreamers(userId);
+
+        if (streamers.length === 0) {
+            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' sub <UID> 来订阅');
+            return;
+        }
+
+        const lines = [
+            `[= 您的订阅列表 =]`,
+            `共 ${streamers.length} 个主播`,
+            ``,
+        ];
+
+        for (let i = 0; i < streamers.length; i++) {
+            const s = streamers[i];
+            const status = s.liveStatus === 1 ? '🔴 直播中' : s.liveStatus === 2 ? '⏺️ 轮播中' : '⚫ 未开播';
+            lines.push(`${i + 1}. ${s.uname}`);
+            lines.push(`   UID: ${s.uid} | ${status}`);
+            if (s.title) {
+                lines.push(`   标题: ${s.title}`);
+            }
+            lines.push(`   https://live.bilibili.com/${s.roomId}`);
+            lines.push('');
+        }
+
+        await sendReply(ctx, event, lines.join('\n'));
+    }
+}
+
+/**
+ * 处理群@全体设置
+ */
+async function handleAtAll(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    args: string[],
+): Promise<void> {
+    if (event.message_type !== 'group' || !event.group_id) {
+        await sendReply(ctx, event, '此命令只能在群聊中使用');
+        return;
+    }
+
+    // 检查权限
+    if (!isAdmin(event)) {
+        await sendReply(ctx, event, '只有群主或管理员才能修改此设置');
+        return;
+    }
+
+    const groupId = String(event.group_id);
+    const action = args[0]?.toLowerCase();
+
+    if (action === 'on' || action === '开启') {
+        storage.setGroupAtAll(groupId, true);
+        await sendReply(ctx, event, '已开启开播@全体功能');
+    } else if (action === 'off' || action === '关闭') {
+        storage.setGroupAtAll(groupId, false);
+        await sendReply(ctx, event, '已关闭开播@全体功能');
+    } else {
+        const current = storage.getGroupAtAll(groupId);
+        await sendReply(ctx, event, `当前@全体状态: ${current ? '开启' : '关闭'}\n用法: ${COMMAND_PREFIX} atall on/off`);
+    }
 }
