@@ -14,6 +14,7 @@ import type { OB11Message, OB11PostSendMsg } from 'napcat-types/napcat-onebot';
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { pluginState } from '../core/state';
 import {getLiveRoomStatusBatch} from "../services/bilibili-service";
+import {storage, Streamer} from "../core/storage";
 
 // ==================== CD 冷却管理 ====================
 /** CD 冷却记录 key: `${groupId}:${command}`, value: 过期时间戳 */
@@ -307,5 +308,18 @@ async function handleAdd(
     // 处理单个直播间数据
     const roomStatus = Array.from(liveRoomData.values())[0];
     const message = `订阅主播：[${roomStatus.uname}] 成功`;
+    const newStreamer: Streamer = {
+        uid: roomStatus.uid,
+        roomId: roomStatus.roomId,
+        uname: roomStatus.uname,
+        liveStatus: roomStatus.liveStatus, // 未开播
+        liveTime: roomStatus.liveTime,
+        title: roomStatus.title,
+        face: roomStatus.face,
+        cover: roomStatus.cover,
+    };
+
+    storage.setStreamer(newStreamer);
+    console.log(`已添加主播: ${newStreamer.uname}`);
     await sendReply(ctx, event, message);
 }

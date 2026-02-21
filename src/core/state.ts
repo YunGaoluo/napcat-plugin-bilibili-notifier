@@ -15,6 +15,7 @@ import path from 'path';
 import type { NapCatPluginContext, PluginLogger } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { DEFAULT_CONFIG } from '../config';
 import type { PluginConfig, GroupConfig } from '../types';
+import { storage } from './storage';
 
 // ==================== 配置清洗工具 ====================
 
@@ -99,6 +100,7 @@ class PluginState {
         this.startTime = Date.now();
         this.loadConfig();
         this.ensureDataDir();
+        storage.loadAll();
         this.fetchSelfId();
     }
 
