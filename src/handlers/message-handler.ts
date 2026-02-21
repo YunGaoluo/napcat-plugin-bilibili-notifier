@@ -472,8 +472,9 @@ async function handleList(
             const status = s.liveStatus === 1 ? '🔴 直播中' : s.liveStatus === 2 ? '⏺️ 轮播中' : '⚫ 未开播';
             lines.push(`${i + 1}. ${s.uname}`);
             lines.push(`   UID: ${s.uid} | ${status}`);
-            if (s.title) {
-                lines.push(`   标题: ${s.title}`);
+            if (s.liveStatus === 1 && s.liveTime > 0) {
+                const liveDuration = Math.floor((Date.now() / 1000 - s.liveTime) / 60);
+                lines.push(`   已开播: ${liveDuration} 分钟`);
             }
             lines.push(`   https://live.bilibili.com/${s.roomId}`);
             lines.push('');
