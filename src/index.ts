@@ -31,6 +31,7 @@ import { buildConfigSchema } from './config';
 import { pluginState } from './core/state';
 import { handleMessage } from './handlers/message-handler';
 import { registerApiRoutes } from './services/api-service';
+import { startScheduler, stopScheduler } from './services/scheduler-service';
 import type { PluginConfig } from './types';
 
 // ==================== 配置 UI Schema ====================
@@ -59,6 +60,9 @@ export const plugin_init: PluginModule['plugin_init'] = async (ctx) => {
 
         // 4. 注册 API 路由
         // registerApiRoutes(ctx);
+
+        // 5. 启动定时任务
+        startScheduler(ctx);
 
         ctx.logger.info('插件初始化完成');
     } catch (error) {
@@ -96,7 +100,9 @@ export const plugin_onevent: PluginModule['plugin_onevent'] = async (ctx, event)
  */
 export const plugin_cleanup: PluginModule['plugin_cleanup'] = async (ctx) => {
     try {
-        // TODO: 在这里清理你的资源（定时器、WebSocket 连接等）
+        // 停止定时任务
+        stopScheduler();
+
         pluginState.cleanup();
         ctx.logger.info('插件已卸载');
     } catch (e) {
