@@ -196,35 +196,16 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
                 const helpText = [
                     `[= B站直播订阅插件帮助 =]`,
                     `${COMMAND_PREFIX} help - 显示帮助信息`,
-                    `${COMMAND_PREFIX} ping - 测试连通性`,
-                    `${COMMAND_PREFIX} status - 查看运行状态`,
                     ``,
                     `【订阅管理】`,
-                    `${COMMAND_PREFIX} sub <UID> - 订阅主播(群/私聊)`,
-                    `${COMMAND_PREFIX} unsub <UID> - 取消订阅主播`,
-                    `${COMMAND_PREFIX} list - 查看订阅列表`,
+                    `${COMMAND_PREFIX} 订阅 <UID> - 订阅主播(群/私聊)`,
+                    `${COMMAND_PREFIX} 删除 <UID> - 取消订阅主播`,
+                    `${COMMAND_PREFIX} 列表 - 查看订阅列表`,
                     ``,
                     `【群管理】`,
                     `${COMMAND_PREFIX} atall on/off - 开启/关闭@全体`,
                 ].join('\n');
                 await sendReply(ctx, event, helpText);
-                break;
-            }
-
-            case 'ping': {
-                await sendReply(ctx, event, 'pong!');
-                pluginState.incrementProcessed();
-                break;
-            }
-
-            case 'status': {
-                const statusText = [
-                    `[= 插件状态 =]`,
-                    `运行时长: ${pluginState.getUptimeFormatted()}`,
-                    `今日处理: ${pluginState.stats.todayProcessed}`,
-                    `总计处理: ${pluginState.stats.processed}`,
-                ].join('\n');
-                await sendReply(ctx, event, statusText);
                 break;
             }
 
@@ -243,6 +224,7 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
                 break;
             }
 
+            case '删除':
             case 'remove':
             case '取消订阅': {
                 await handleUnsubscribe(ctx, event, args);
@@ -441,7 +423,6 @@ async function handleList(
         if (groupSub) {
             lines.push(`[群设置]`);
             lines.push(`@全体: ${groupSub.enableAtAll ? '开启' : '关闭'}`);
-            lines.push(`推送: ${groupSub.enabled ? '开启' : '关闭'}`);
         }
 
         await sendReply(ctx, event, lines.join('\n'));
