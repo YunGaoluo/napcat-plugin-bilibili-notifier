@@ -9,35 +9,19 @@
  *   plugin_onevent     → 收到所有 OneBot 事件时调用
  *   plugin_cleanup     → 插件卸载/重载时调用
  *
- * 配置相关：
- *   plugin_config_ui          → 导出配置 Schema，用于 WebUI 自动生成配置面板
- *   plugin_get_config         → 自定义配置读取
- *   plugin_set_config         → 自定义配置保存
- *   plugin_on_config_change   → 配置变更回调
- *
  * @author Your Name
  * @license MIT
  */
 
 import type {
     PluginModule,
-    PluginConfigSchema,
-    PluginConfigUIController,
     NapCatPluginContext,
 } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { EventType } from 'napcat-types/napcat-onebot/event/index';
 
-import { buildConfigSchema } from './config';
 import { pluginState } from './core/state';
 import { handleMessage } from './handlers/message-handler';
-import { registerApiRoutes } from './services/api-service';
 import { startLiveMonitor, stopLiveMonitor } from './services/live-monitor-service';
-import type { PluginConfig } from './types';
-
-// ==================== 配置 UI Schema ====================
-
-/** NapCat WebUI 读取此导出来展示配置面板 */
-export let plugin_config_ui: PluginConfigSchema = [];
 
 // ==================== 生命周期函数 ====================
 
@@ -47,7 +31,7 @@ export let plugin_config_ui: PluginConfigSchema = [];
  */
 export const plugin_init: PluginModule['plugin_init'] = async (ctx) => {
     try {
-        // 1. 初始化全局状态（加载配置）
+        // 1. 初始化全局状态
         pluginState.init(ctx);
 
         ctx.logger.info('插件初始化中...');
@@ -68,8 +52,6 @@ export const plugin_init: PluginModule['plugin_init'] = async (ctx) => {
 export const plugin_onmessage: PluginModule['plugin_onmessage'] = async (ctx, event) => {
     // 仅处理消息事件
     if (event.post_type !== EventType.MESSAGE) return;
-    // 检查插件是否启用
-    if (!pluginState.config.enabled) return;
     // 委托给消息处理器
     await handleMessage(ctx, event);
 };
@@ -90,6 +72,3 @@ export const plugin_cleanup: PluginModule['plugin_cleanup'] = async (ctx) => {
         ctx.logger.warn('插件卸载时出错:', e);
     }
 };
-
-
-

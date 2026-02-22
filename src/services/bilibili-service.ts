@@ -100,10 +100,8 @@ export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number
             }
         }
 
-        // 调试模式下输出详细日志
-        if (pluginState.config.debug) {
-            pluginState.logger.debug(`(｡･ω･｡) 获取 ${result.size}/${uids.length} 个直播间状态`);
-        }
+        // 输出详细日志
+        pluginState.logger.debug(`(｡･ω･｡) 获取 ${result.size}/${uids.length} 个直播间状态`);
     } catch (error) {
         // 捕获并记录所有异常错误
         pluginState.logger.error('(╥﹏╥) 获取直播间状态失败:', error);

@@ -185,11 +185,6 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
 
         pluginState.ctx.logger.debug(`收到消息: ${rawMessage} | 类型: ${messageType}`);
 
-        // 群消息：检查该群是否启用
-        if (messageType === 'group' && groupId) {
-            if (!pluginState.isGroupEnabled(String(groupId))) return;
-        }
-
         const parsed = parseCommand(rawMessage);
         if (!parsed) return;
 
