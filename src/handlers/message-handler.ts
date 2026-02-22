@@ -431,7 +431,7 @@ async function handleList(
 
         for (let i = 0; i < streamers.length; i++) {
             const s = streamers[i];
-            const status = s.liveStatus === 1 ? '🔴 直播中' : s.liveStatus === 2 ? '⏺️ 轮播中' : '⚫ 未开播';
+            const status = s.liveStatus === 1 ? '直播中' : s.liveStatus === 2 ? '轮播中' : '未开播';
             lines.push(`${i + 1}. ${s.uname}`);
             lines.push(`   UID: ${s.uid} | ${status}`);
             if (s.liveStatus === 1 && s.liveTime > 0) {
@@ -469,7 +469,7 @@ async function handleList(
 
         for (let i = 0; i < streamers.length; i++) {
             const s = streamers[i];
-            const status = s.liveStatus === 1 ? '🔴 直播中' : s.liveStatus === 2 ? '⏺️ 轮播中' : '⚫ 未开播';
+            const status = s.liveStatus === 1 ? '直播中' : s.liveStatus === 2 ? '轮播中' : '未开播';
             lines.push(`${i + 1}. ${s.uname}`);
             lines.push(`   UID: ${s.uid} | ${status}`);
             if (s.liveStatus === 1 && s.liveTime > 0) {

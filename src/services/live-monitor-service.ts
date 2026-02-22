@@ -4,6 +4,7 @@
  */
 
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
+// @ts-ignore
 import type { OB11PostSendMsg } from 'napcat-types/napcat-onebot/types/event';
 import { pluginState } from '../core/state';
 import { storage } from '../core/storage';
@@ -183,12 +184,10 @@ export class LiveMonitorService {
 
         // 构建开播消息
         const message = [
-            `🎉 ${streamer.uname} 开播啦！`,
-            ``,
-            `📺 ${status.title}`,
-            `🏷️ 分区: ${status.parentAreaName} > ${status.areaName}`,
-            `👥 在线: ${status.online} 人`,
-            `🔗 https://live.bilibili.com/${status.roomId}`,
+            `${streamer.uname} 开播啦！`,
+            `标题：${status.title}`,
+            `分区: ${status.parentAreaName} - ${status.areaName}`,
+            `https://live.bilibili.com/${status.roomId}`,
         ].join('\n');
 
         // 构建消息段
@@ -244,10 +243,8 @@ export class LiveMonitorService {
 
         // 构建下播消息
         const message = [
-            `👋 ${streamer.uname} 下播了`,
-            ``,
-            `⏱️ 本次直播时长: ${duration}`,
-            `感谢大家的陪伴，下次见！`,
+            `${streamer.uname}下播了`,
+            `本次直播时长: ${duration}`,
         ].join('\n');
 
         // 构建消息段
