@@ -3,6 +3,7 @@ import { defineConfig } from 'vite';
 import nodeResolve from '@rollup/plugin-node-resolve';
 import { builtinModules } from 'module';
 import { fileURLToPath } from 'url';
+import { copyFileSync } from 'fs';
 
 // @ts-ignore
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -12,6 +13,16 @@ const nodeModules = [
     ...builtinModules.map((m) => `node:${m}`),
 ].flat();
 
+// 自定义插件用于复制 package.json
+const copyPackageJson = () => ({
+    name: 'copy-package-json',
+    closeBundle() {
+        const src = resolve(__dirname, 'package.json');
+        const dest = resolve(__dirname, 'dist/package.json');
+        copyFileSync(src, dest);
+        console.log('✅ package.json copied to dist/');
+    }
+});
 
 export default defineConfig({
     resolve: {
@@ -34,5 +45,8 @@ export default defineConfig({
         },
         outDir: 'dist',
     },
-    plugins: [nodeResolve()],
+    plugins: [
+        nodeResolve(),
+        copyPackageJson()
+    ],
 });
