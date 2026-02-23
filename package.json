@@ -23,12 +23,14 @@
     "homepage": "https://github.com/YunGaoluo/napcat-plugin-bilibili-notifier"
   },
   "dependencies": {
-    "napcat-types": "0.0.16"
+    "napcat-types": "0.0.16",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "@rollup/plugin-node-resolve": "^15.3.1",
     "@types/express": "^5.0.6",
     "@types/node": "^20.19.33",
+    "@types/node-cron": "^3.0.11",
     "napcat-plugin-debug-cli": "^1.2.8",
     "typescript": "^5.9.3",
     "vite": "^6.4.1",

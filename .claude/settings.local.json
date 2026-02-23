@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git config --global --get:*)",
       "Bash(git push:*)",
-      "Bash(git fetch:*)"
+      "Bash(git fetch:*)",
+      "WebSearch"
     ]
   }
 }

@@ -6,6 +6,8 @@
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 // @ts-ignore
 import type { OB11PostSendMsg } from 'napcat-types/napcat-onebot/types/event';
+import cron from 'node-cron';
+import type { ScheduledTask } from 'node-cron';
 import { pluginState } from '../core/state';
 import { storage } from '../core/storage';
 import type { Streamer } from '../core/storage';
@@ -24,7 +26,7 @@ interface StreamerLiveCache {
 
 export class LiveMonitorService {
     private ctx: NapCatPluginContext;
-    private intervalId: NodeJS.Timeout | null = null;
+    private cronJob: ScheduledTask | null = null;
     private isRunning: boolean = false;
     /** 主播状态缓存 Map<uid, StreamerLiveCache> */
     private liveCache: Map<number, StreamerLiveCache> = new Map();
@@ -70,10 +72,12 @@ export class LiveMonitorService {
         // 立即执行一次检查
         this.checkAllStreamers();
 
-        // 每10秒检查一次
-        this.intervalId = setInterval(() => {
+        // 每10秒检查一次 (cron表达式: 每10秒执行)
+        this.cronJob = cron.schedule('*/10 * * * * *', () => {
             this.checkAllStreamers();
-        }, 10000);
+        }, {
+            scheduled: true
+        });
     }
 
     /**
@@ -86,9 +90,9 @@ export class LiveMonitorService {
 
         this.ctx.logger.info('停止直播监控服务');
 
-        if (this.intervalId) {
-            clearInterval(this.intervalId);
-            this.intervalId = null;
+        if (this.cronJob) {
+            this.cronJob.stop();
+            this.cronJob = null;
         }
 
         this.saveCache();

@@ -5,9 +5,9 @@ import { builtinModules } from 'module';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { napcatHmrPlugin } from 'napcat-plugin-debug-cli/vite';
-// @ts-ignore
-const __dirname = dirname(fileURLToPath(import.meta.url));
 import fs from 'fs';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const nodeModules = [
     ...builtinModules,
     ...builtinModules.map((m) => `node:${m}`),
@@ -81,6 +81,15 @@ export default defineConfig({
     },
     plugins: [
         nodeResolve(),
+        {
+            name: 'fix-dirname',
+            transform(code, id) {
+                if (id.includes('node-cron')) {
+                    return code.replace(/__dirname/g, 'process.cwd()');
+                }
+                return code;
+            }
+        },
         copyAssetsPlugin(),
         napcatHmrPlugin({
             wsUrl: 'ws://192.168.5.4:8998'
