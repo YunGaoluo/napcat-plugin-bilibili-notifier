@@ -4,53 +4,59 @@ import nodeResolve from '@rollup/plugin-node-resolve';
 import { builtinModules } from 'module';
 import { fileURLToPath } from 'url';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-
+import { napcatHmrPlugin } from 'napcat-plugin-debug-cli/vite';
 // @ts-ignore
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
+import fs from 'fs';
 const nodeModules = [
     ...builtinModules,
     ...builtinModules.map((m) => `node:${m}`),
 ].flat();
 
-// 生成精简 package.json 的插件
-const generateMinimalPackageJson = () => ({
-    name: 'generate-minimal-package-json',
-    closeBundle() {
-        const pkgPath = resolve(__dirname, 'package.json');
-        const distDir = resolve(__dirname, 'dist');
+/**
+ * 构建后自动复制资源的 Vite 插件
+ * - 复制 webui 构建产物到 dist/webui
+ * - 生成精简的 package.json（只保留运行时必要字段）
+ * - 复制 templates 目录（如果存在）
+ */
+function copyAssetsPlugin() {
+    return {
+        name: 'copy-assets',
+        writeBundle() {
+            try {
+                const distDir = resolve(__dirname, 'dist');
 
-        // 确保 dist 目录存在
-        if (!existsSync(distDir)) {
-            mkdirSync(distDir, { recursive: true });
-        }
+                // 3. 生成精简的 package.json（只保留运行时必要字段）
+                const pkgPath = resolve(__dirname, 'package.json');
+                if (fs.existsSync(pkgPath)) {
+                    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+                    const distPkg: Record<string, unknown> = {
+                        name: pkg.name,
+                        plugin: pkg.plugin,
+                        version: pkg.version,
+                        type: pkg.type,
+                        main: pkg.main,
+                        description: pkg.description,
+                        author: pkg.author,
+                        dependencies: pkg.dependencies,
+                    };
+                    if (pkg.napcat) {
+                        distPkg.napcat = pkg.napcat;
+                    }
+                    fs.writeFileSync(
+                        resolve(distDir, 'package.json'),
+                        JSON.stringify(distPkg, null, 2)
+                    );
+                    console.log('[copy-assets] (o\'v\'o) 已生成精简 package.json');
+                }
 
-        if (existsSync(pkgPath)) {
-            const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-            const distPkg: Record<string, unknown> = {
-                name: pkg.name,
-                plugin: pkg.plugin,
-                version: pkg.version,
-                type: pkg.type,
-                main: pkg.main,
-                description: pkg.description,
-                author: pkg.author,
-                dependencies: pkg.dependencies,
-            };
-
-            if (pkg.napcat) {
-                distPkg.napcat = pkg.napcat;
+                console.log('[copy-assets] (*\'v\'*) 资源复制完成！');
+            } catch (error) {
+                console.error('[copy-assets] (;_;) 资源复制失败:', error);
             }
-
-            writeFileSync(
-                resolve(distDir, 'package.json'),
-                JSON.stringify(distPkg, null, 2)
-            );
-
-            console.log('[copy-assets] (o\'v\'o) 已生成精简 package.json');
-        }
-    }
-});
+        },
+    };
+}
 
 export default defineConfig({
     resolve: {
@@ -75,6 +81,9 @@ export default defineConfig({
     },
     plugins: [
         nodeResolve(),
-        generateMinimalPackageJson()
+        copyAssetsPlugin(),
+        napcatHmrPlugin({
+            wsUrl: 'ws://192.168.5.4:8998'
+        })
     ],
 });
