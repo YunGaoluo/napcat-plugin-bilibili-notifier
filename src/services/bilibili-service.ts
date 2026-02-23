@@ -106,7 +106,6 @@ export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number
         // 捕获并记录所有异常错误
         pluginState.logger.error('(╥﹏╥) 获取直播间状态失败:', error);
     }
-
     // 返回最终的直播间状态结果
     return result;
 }
