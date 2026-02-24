@@ -67,6 +67,8 @@ export enum DynamicType {
     ARTICLE = 'DYNAMIC_TYPE_ARTICLE',
     /** 音频 */
     MUSIC = 'DYNAMIC_TYPE_MUSIC',
+    /** 直播 */
+    LIVE = 'DYNAMIC_TYPE_LIVE',
 }
 
 /** 动态作者信息 */

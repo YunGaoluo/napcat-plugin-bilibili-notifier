@@ -235,6 +235,14 @@ interface ModuleDynamic {
     dyn_forward?: {
         item: DynamicItemRaw;
     };
+    dyn_live?: {
+        id: number;
+        cover: string;
+        live_type: number;
+        live_status: number;
+        title: string;
+        jump_url: string;
+    };
 }
 
 interface DynamicItemRaw {

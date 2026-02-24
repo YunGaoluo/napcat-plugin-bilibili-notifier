@@ -9,12 +9,12 @@ import type { ScheduledTask } from 'node-cron';
 import { pluginState } from '../core/state';
 import { storage } from '../core/storage';
 import { getUserDynamics } from './bilibili-service';
-import type { DynamicInfo, DynamicType } from '../types';
+import { DynamicInfo, DynamicType } from '../types';
 import { createNotificationService, type NotificationService } from './notification-service';
 
 /** 动态缓存 */
 interface DynamicCache {
-    lastDynamicId: string;
+    /** 上次检查时间戳（毫秒） */
     lastCheckTime: number;
 }
 
@@ -26,7 +26,13 @@ const DYNAMIC_TYPE_NAMES: Record<DynamicType, string> = {
     DYNAMIC_TYPE_WORD: '文字',
     DYNAMIC_TYPE_ARTICLE: '专栏',
     DYNAMIC_TYPE_MUSIC: '音频',
+    DYNAMIC_TYPE_LIVE: '直播',
 };
+
+/** 需要跳过的动态类型（不推送） */
+const SKIP_DYNAMIC_TYPES: DynamicType[] = [
+    DynamicType.LIVE,  // 直播开播动态不推送
+];
 
 export class DynamicMonitorService {
     private ctx: NapCatPluginContext;
@@ -82,7 +88,7 @@ export class DynamicMonitorService {
             for (const streamer of subscribedStreamers) {
                 await this.checkStreamerDynamic(streamer.uid);
                 // 添加短暂延迟避免请求过快
-                await this.delay(500);
+                await this.delay(1000);
             }
 
             this.saveCache();
@@ -100,49 +106,53 @@ export class DynamicMonitorService {
         const dynamics = await getUserDynamics(uid);
         if (dynamics.length === 0) return;
 
-        // 获取最新的一条动态
-        const latestDynamic = dynamics[0];
+        const now = Date.now();
         const cache = this.dynamicCache.get(uid);
 
         // 首次检查，只记录不推送
         if (!cache) {
             this.dynamicCache.set(uid, {
-                lastDynamicId: latestDynamic.id,
-                lastCheckTime: Date.now(),
+                lastCheckTime: now,
             });
-            this.ctx.logger.debug(`[动态] 初始化 ${streamer.uname} 的动态缓存，最新ID: ${latestDynamic.id}`);
+            this.ctx.logger.debug(`[动态] 初始化 ${streamer.uname} 的动态缓存`);
             return;
         }
 
-        // 检查是否有新动态
-        if (latestDynamic.id !== cache.lastDynamicId) {
-            // 找出所有新动态（可能有多个）
-            const newDynamics = this.findNewDynamics(dynamics, cache.lastDynamicId);
+        // 根据发布时间找出所有新动态
+        const newDynamics = this.findNewDynamicsByTime(dynamics, cache.lastCheckTime);
 
+        // 过滤掉不需要推送的类型（如直播）
+        const filteredDynamics = newDynamics.filter(dynamic => !SKIP_DYNAMIC_TYPES.includes(dynamic.type));
+
+        if (filteredDynamics.length > 0) {
             // 按时间正序推送（先发旧的，再发新的）
-            for (let i = newDynamics.length - 1; i >= 0; i--) {
-                const dynamic = newDynamics[i];
+            for (let i = filteredDynamics.length - 1; i >= 0; i--) {
+                const dynamic = filteredDynamics[i];
                 this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
                 await this.sendDynamicNotification(uid, dynamic);
             }
-
-            // 更新缓存
-            cache.lastDynamicId = latestDynamic.id;
-            cache.lastCheckTime = Date.now();
-            this.dynamicCache.set(uid, cache);
         }
+
+        // 记录被跳过的动态
+        const skippedCount = newDynamics.length - filteredDynamics.length;
+        if (skippedCount > 0) {
+            this.ctx.logger.debug(`[动态] ${streamer.uname}: 跳过 ${skippedCount} 条直播动态`);
+        }
+
+        // 更新缓存
+        cache.lastCheckTime = now;
+        this.dynamicCache.set(uid, cache);
     }
 
-    /** 找出所有新动态 */
-    private findNewDynamics(dynamics: DynamicInfo[], lastDynamicId: string): DynamicInfo[] {
-        const result: DynamicInfo[] = [];
-        for (const dynamic of dynamics) {
-            if (dynamic.id === lastDynamicId) {
-                break;
-            }
-            result.push(dynamic);
-        }
-        return result;
+    /**
+     * 根据发布时间找出所有新动态
+     * @param dynamics 动态列表
+     * @param lastCheckTime 上次检查时间（毫秒）
+     * @returns 发布时间在上次检查时间之后的动态
+     */
+    private findNewDynamicsByTime(dynamics: DynamicInfo[], lastCheckTime: number): DynamicInfo[] {
+        // pub_ts 是秒级时间戳，需要转换为毫秒进行比较
+        return dynamics.filter(dynamic => dynamic.author.pub_ts * 1000 > lastCheckTime);
     }
 
     /** 发送动态通知 */
