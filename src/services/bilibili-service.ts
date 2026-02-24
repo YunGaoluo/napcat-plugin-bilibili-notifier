@@ -3,7 +3,8 @@
  * 封装B站HTTP接口调用
  */
 
-import type { LiveRoomStatus, ApiResponse } from '../types';
+import type { LiveRoomStatus, ApiResponse, DynamicInfo, DynamicAuthor, DynamicContent } from '../types';
+import { DynamicType } from '../types';
 import { pluginState } from '../core/state';
 
 /** 请求超时（毫秒） */
@@ -12,7 +13,7 @@ const REQUEST_TIMEOUT = 10000;
 /** B站请求Headers */
 const BILI_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Referer': 'https://live.bilibili.com/',
+   
 };
 
 /**
@@ -108,4 +109,223 @@ export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number
     }
     // 返回最终的直播间状态结果
     return result;
+}
+
+// ==================== 动态相关 API ====================
+
+/**
+ * 获取用户空间动态列表
+ * API: https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space
+ * @param uid 用户UID
+ * @returns 动态列表（按时间倒序，最新的在最前面）
+ */
+export async function getUserDynamics(uid: number): Promise<DynamicInfo[]> {
+    const result: DynamicInfo[] = [];
+
+    const startTime = Date.now();
+
+    try {
+        const url = `https://api.bilibili.com/x/polymer/web-dynamic/desktop/v1/feed/space?host_mid=${uid}`;
+
+        // 记录请求日志（包含请求头）
+        const requestHeaders = { ...BILI_HEADERS };
+        pluginState.logger.debug(`(｡･ω･｡) 获取用户动态列表请求: uid=${uid}, url=${url}, headers=${JSON.stringify(requestHeaders)}`);
+
+        const response = await fetch(url, {
+            method: 'GET',
+            headers: requestHeaders,
+        });
+
+        if (!response.ok) {
+            pluginState.logger.error(`(╥﹏╥) 获取用户动态列表响应错误: HTTP ${response.status}`);
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json() as ApiResponse<{
+            items: DynamicItemRaw[];
+        }>;
+
+        // 记录响应日志（包含完整响应数据）
+        pluginState.logger.debug(`(｡･ω･｡) 获取用户动态列表响应: uid=${uid}, code=${data.code}, message=${data.message || 'success'}, items=${data.data?.items?.length ?? 0}`);
+        pluginState.logger.debug(`(｡･ω･｡) 响应数据: ${JSON.stringify(data, null, 2)}`);
+
+        if (data.code !== 0) {
+            throw new Error(`API Error: ${data.message}`);
+        }
+
+        if (!data.data?.items) {
+            pluginState.logger.warn(`(◕‿◕) 用户 ${uid} 动态列表为空`);
+            return result;
+        }
+
+        // 解析动态列表
+        for (const item of data.data.items) {
+            try {
+                const dynamic = parseDynamicItem(item);
+                if (dynamic !== undefined) {
+                    result.push(dynamic);
+                    pluginState.logger.debug(`(｡･ω･｡) 解析动态成功: id=${dynamic.id}, type=${dynamic.type}, author=${dynamic.author.name}`);
+                } else {
+                    pluginState.logger.warn(`(◕‿◕) 解析动态失败: id=${item.id_str}, type=${item.type}`);
+                }
+            } catch (parseError) {
+                pluginState.logger.error(`(╥﹏╥) 解析动态异常: id=${item.id_str}, type=${item.type}, error=`, parseError);
+            }
+        }
+
+        const duration = Date.now() - startTime;
+        pluginState.logger.debug(`(✿◠‿◠) 获取用户动态列表完成: uid=${uid}, 成功解析=${result.length}条, 原始数据=${data.data.items.length}条, 耗时=${duration}ms`);
+    } catch (error) {
+        const duration = Date.now() - startTime;
+        pluginState.logger.error(`(╥﹏╥) 获取用户 ${uid} 动态失败, 耗时=${duration}ms:`, error);
+    }
+
+    return result;
+}
+
+/**
+ * 新API响应中的Module类型
+ */
+type ModuleItem =
+    | { module_type: 'MODULE_TYPE_AUTHOR'; module_author: ModuleAuthor }
+    | { module_type: 'MODULE_TYPE_DESC'; module_desc: ModuleDesc }
+    | { module_type: 'MODULE_TYPE_DYNAMIC'; module_dynamic: ModuleDynamic }
+    | { module_type: 'MODULE_TYPE_STAT'; module_stat: unknown }
+    | { module_type: string; [key: string]: unknown };
+
+interface ModuleAuthor {
+    user: {
+        mid: number;
+        name: string;
+        face: string;
+    };
+    pub_time: string;
+    pub_ts: number;
+}
+
+interface ModuleDesc {
+    text: string;
+    rich_text_nodes: Array<{
+        type: string;
+        text: string;
+        orig_text?: string;
+        jump_url?: string;
+    }>;
+}
+
+interface ModuleDynamic {
+    type: string;
+    dyn_draw?: {
+        id: number;
+        items: Array<{
+            src: string;
+            width: number;
+            height: number;
+        }>;
+    };
+    dyn_archive?: {
+        aid: string;
+        bvid: string;
+        title: string;
+        cover: string;
+        desc: string;
+        duration_text: string;
+        jump_url: string;
+    };
+    dyn_forward?: {
+        item: DynamicItemRaw;
+    };
+}
+
+interface DynamicItemRaw {
+    id_str: string;
+    type: string;
+    modules: ModuleItem[];
+}
+
+/**
+ * 从modules数组中提取指定类型的module
+ */
+function getModule<T extends ModuleItem['module_type']>(
+    modules: ModuleItem[],
+    type: T
+): Extract<ModuleItem, { module_type: T }> | undefined {
+    return modules.find((m): m is Extract<ModuleItem, { module_type: T }> => m.module_type === type);
+}
+
+/**
+ * 解析动态数据结构（适配新API格式）
+ */
+function parseDynamicItem(item: DynamicItemRaw): DynamicInfo | undefined {
+    const type = item.type as DynamicType;
+
+    // 提取作者信息
+    const authorModule = getModule(item.modules, 'MODULE_TYPE_AUTHOR');
+    if (!authorModule?.module_author) {
+        pluginState.logger.warn(`(◕‿◕) 动态 ${item.id_str} 缺少作者信息`);
+        return undefined;
+    }
+    const authorData = authorModule.module_author;
+    const author: DynamicAuthor = {
+        mid: authorData.user.mid,
+        name: authorData.user.name,
+        face: authorData.user.face,
+        pub_time: authorData.pub_time,
+        pub_ts: authorData.pub_ts,
+    };
+
+    // 提取文字描述
+    const descModule = getModule(item.modules, 'MODULE_TYPE_DESC');
+    const content: DynamicContent = {
+        text: descModule?.module_desc?.text ?? '',
+        rich_text_nodes: descModule?.module_desc?.rich_text_nodes ?? [],
+    };
+
+    const dynamic: DynamicInfo = {
+        id: item.id_str,
+        type,
+        author,
+        content,
+    };
+
+    // 提取动态内容（图片、视频等）
+    const dynamicModule = getModule(item.modules, 'MODULE_TYPE_DYNAMIC');
+    if (dynamicModule?.module_dynamic) {
+        const dynData = dynamicModule.module_dynamic;
+
+        switch (dynData.type) {
+            case 'MDL_DYN_TYPE_DRAW':
+                // 图文动态
+                if (dynData.dyn_draw) {
+                    dynamic.draw = {
+                        items: dynData.dyn_draw.items,
+                    };
+                }
+                break;
+
+            case 'MDL_DYN_TYPE_ARCHIVE':
+                // 视频投稿
+                if (dynData.dyn_archive) {
+                    dynamic.archive = {
+                        aid: dynData.dyn_archive.aid,
+                        bvid: dynData.dyn_archive.bvid,
+                        title: dynData.dyn_archive.title,
+                        cover: dynData.dyn_archive.cover,
+                        desc: dynData.dyn_archive.desc,
+                        duration_text: dynData.dyn_archive.duration_text,
+                        jump_url: dynData.dyn_archive.jump_url,
+                    };
+                }
+                break;
+
+            case 'MDL_DYN_TYPE_FORWARD':
+                // 转发动态
+                if (dynData.dyn_forward?.item) {
+                    dynamic.orig = parseDynamicItem(dynData.dyn_forward.item);
+                }
+                break;
+        }
+    }
+
+    return dynamic;
 }

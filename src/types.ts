@@ -50,3 +50,81 @@ export interface LiveRoomStatus {
     /** 标签 */
     tags: string;
 }
+
+// ==================== 动态相关类型 ====================
+
+/** 动态类型 */
+export enum DynamicType {
+    /** 转发 */
+    FORWARD = 'DYNAMIC_TYPE_FORWARD',
+    /** 视频投稿 */
+    AV = 'DYNAMIC_TYPE_AV',
+    /** 图文动态 */
+    DRAW = 'DYNAMIC_TYPE_DRAW',
+    /** 文字动态 */
+    WORD = 'DYNAMIC_TYPE_WORD',
+    /** 专栏 */
+    ARTICLE = 'DYNAMIC_TYPE_ARTICLE',
+    /** 音频 */
+    MUSIC = 'DYNAMIC_TYPE_MUSIC',
+}
+
+/** 动态作者信息 */
+export interface DynamicAuthor {
+    mid: number;
+    name: string;
+    face: string;
+    pub_time: string;
+    pub_ts: number;
+}
+
+/** 视频动态内容 */
+export interface DynamicArchive {
+    aid: string;
+    bvid: string;
+    title: string;
+    cover: string;
+    desc: string;
+    duration_text: string;
+    jump_url: string;
+}
+
+/** 图文动态内容 */
+export interface DynamicDraw {
+    items: Array<{
+        src: string;
+        width: number;
+        height: number;
+    }>;
+}
+
+/** 动态内容 */
+export interface DynamicContent {
+    text: string;
+    rich_text_nodes: Array<{
+        type: string;
+        text: string;
+        orig_text?: string;
+        jump_url?: string;
+    }>;
+}
+
+/** 动态信息 */
+export interface DynamicInfo {
+    /** 动态ID */
+    id: string;
+    /** 动态类型 */
+    type: DynamicType;
+    /** 作者信息 */
+    author: DynamicAuthor;
+    /** 动态内容 */
+    content: DynamicContent;
+    /** 视频信息（仅视频动态） */
+    archive?: DynamicArchive;
+    /** 图片信息（仅图文动态） */
+    draw?: DynamicDraw;
+    /** 转发源动态（仅转发类型） */
+    orig?: DynamicInfo;
+    /** 动态链接 */
+    jump_url?: string;
+}

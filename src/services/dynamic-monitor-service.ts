@@ -8,6 +8,8 @@ import cron from 'node-cron';
 import type { ScheduledTask } from 'node-cron';
 import { pluginState } from '../core/state';
 import { storage } from '../core/storage';
+import { getUserDynamics } from './bilibili-service';
+import type { DynamicInfo, DynamicType } from '../types';
 import { createNotificationService, type NotificationService } from './notification-service';
 
 /** 动态缓存 */
@@ -15,6 +17,16 @@ interface DynamicCache {
     lastDynamicId: string;
     lastCheckTime: number;
 }
+
+/** 动态类型显示映射 */
+const DYNAMIC_TYPE_NAMES: Record<DynamicType, string> = {
+    DYNAMIC_TYPE_FORWARD: '转发',
+    DYNAMIC_TYPE_AV: '视频',
+    DYNAMIC_TYPE_DRAW: '图文',
+    DYNAMIC_TYPE_WORD: '文字',
+    DYNAMIC_TYPE_ARTICLE: '专栏',
+    DYNAMIC_TYPE_MUSIC: '音频',
+};
 
 export class DynamicMonitorService {
     private ctx: NapCatPluginContext;
@@ -69,6 +81,8 @@ export class DynamicMonitorService {
 
             for (const streamer of subscribedStreamers) {
                 await this.checkStreamerDynamic(streamer.uid);
+                // 添加短暂延迟避免请求过快
+                await this.delay(500);
             }
 
             this.saveCache();
@@ -77,39 +91,129 @@ export class DynamicMonitorService {
         }
     }
 
-    /** 检查单个主播的动态 */
+    /** 检查单个主播的最新动态 */
     private async checkStreamerDynamic(uid: number): Promise<void> {
-        const cache = this.dynamicCache.get(uid) ?? {
-            lastDynamicId: '',
-            lastCheckTime: 0,
-        };
-
-        // TODO: 调用B站API获取最新动态
-        // const latestDynamic = await getLatestDynamic(uid);
-
-        // TODO: 检测是否有新动态
-        // if (cache.lastDynamicId && latestDynamic.id !== cache.lastDynamicId) {
-        //     this.ctx.logger.info(`[新动态] ${streamer.uname}`);
-        //     await this.sendDynamicNotification(streamer, latestDynamic);
-        // }
-
-        // TODO: 更新缓存
-        // cache.lastDynamicId = latestDynamic.id;
-        // cache.lastCheckTime = Date.now();
-        // this.dynamicCache.set(uid, cache);
-    }
-
-    /** 发送动态通知 */
-    private async sendDynamicNotification(uid: number, dynamic: unknown): Promise<void> {
         const streamer = storage.getStreamer(uid);
         if (!streamer) return;
 
-        const message = `${streamer.uname} 发布了新动态！`;
+        // 获取用户动态列表
+        const dynamics = await getUserDynamics(uid);
+        if (dynamics.length === 0) return;
+
+        // 获取最新的一条动态
+        const latestDynamic = dynamics[0];
+        const cache = this.dynamicCache.get(uid);
+
+        // 首次检查，只记录不推送
+        if (!cache) {
+            this.dynamicCache.set(uid, {
+                lastDynamicId: latestDynamic.id,
+                lastCheckTime: Date.now(),
+            });
+            this.ctx.logger.debug(`[动态] 初始化 ${streamer.uname} 的动态缓存，最新ID: ${latestDynamic.id}`);
+            return;
+        }
+
+        // 检查是否有新动态
+        if (latestDynamic.id !== cache.lastDynamicId) {
+            // 找出所有新动态（可能有多个）
+            const newDynamics = this.findNewDynamics(dynamics, cache.lastDynamicId);
+
+            // 按时间正序推送（先发旧的，再发新的）
+            for (let i = newDynamics.length - 1; i >= 0; i--) {
+                const dynamic = newDynamics[i];
+                this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
+                await this.sendDynamicNotification(uid, dynamic);
+            }
+
+            // 更新缓存
+            cache.lastDynamicId = latestDynamic.id;
+            cache.lastCheckTime = Date.now();
+            this.dynamicCache.set(uid, cache);
+        }
+    }
+
+    /** 找出所有新动态 */
+    private findNewDynamics(dynamics: DynamicInfo[], lastDynamicId: string): DynamicInfo[] {
+        const result: DynamicInfo[] = [];
+        for (const dynamic of dynamics) {
+            if (dynamic.id === lastDynamicId) {
+                break;
+            }
+            result.push(dynamic);
+        }
+        return result;
+    }
+
+    /** 发送动态通知 */
+    private async sendDynamicNotification(uid: number, dynamic: DynamicInfo): Promise<void> {
+        const streamer = storage.getStreamer(uid);
+        if (!streamer) return;
+
+        const typeName = DYNAMIC_TYPE_NAMES[dynamic.type] || '动态';
+        const message = this.buildDynamicMessage(streamer.uname, typeName, dynamic);
+
+        // 获取第一张图片（如果有）
+        let image: string | undefined;
+        if (dynamic.archive?.cover) {
+            image = dynamic.archive.cover;
+        } else if (dynamic.draw?.items && dynamic.draw.items.length > 0) {
+            image = dynamic.draw.items[0].src;
+        }
 
         await this.notificationService.sendToSubscribers(uid, {
             text: message,
-            // image: dynamic.images?.[0], // 如果有图片
+            image,
         });
+    }
+
+    /** 构建动态消息文本 */
+    private buildDynamicMessage(uname: string, typeName: string, dynamic: DynamicInfo): string {
+        const lines: string[] = [];
+
+        // 标题行
+        lines.push(`${uname} 发布了新${typeName}动态！`);
+        lines.push('');
+
+        // 内容（限制长度）
+        const content = dynamic.content.text || '无文字内容';
+        lines.push(this.truncateText(content, 200));
+
+        // 视频/专栏链接
+        if (dynamic.archive) {
+            lines.push('');
+            lines.push(`《${dynamic.archive.title}》`);
+            lines.push(`https://www.bilibili.com/video/${dynamic.archive.bvid}`);
+        }
+
+        // 转发源
+        if (dynamic.orig) {
+            lines.push('');
+            lines.push('━━━━━━━━━━━━');
+            lines.push(`转发自 @${dynamic.orig.author.name}:`);
+            const origContent = dynamic.orig.content.text || '无文字内容';
+            lines.push(this.truncateText(origContent, 100));
+            if (dynamic.orig.archive) {
+                lines.push(`https://www.bilibili.com/video/${dynamic.orig.archive.bvid}`);
+            }
+        }
+
+        // 动态链接
+        lines.push('');
+        lines.push(`https://t.bilibili.com/${dynamic.id}`);
+
+        return lines.join('\n');
+    }
+
+    /** 截断文本 */
+    private truncateText(text: string, maxLength: number): string {
+        if (text.length <= maxLength) return text;
+        return text.substring(0, maxLength) + '...';
+    }
+
+    /** 延迟函数 */
+    private delay(ms: number): Promise<void> {
+        return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     /** 加载缓存 */

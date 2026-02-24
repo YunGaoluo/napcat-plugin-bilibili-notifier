@@ -22,6 +22,7 @@ import { EventType } from 'napcat-types/napcat-onebot/event/index';
 import { pluginState } from './core/state';
 import { handleMessage } from './handlers/message-handler';
 import { startLiveMonitor, stopLiveMonitor } from './services/live-monitor-service';
+import { startDynamicMonitor, stopDynamicMonitor } from './services/dynamic-monitor-service';
 
 // ==================== 生命周期函数 ====================
 
@@ -38,6 +39,9 @@ export const plugin_init: PluginModule['plugin_init'] = async (ctx) => {
 
         // 5. 启动直播监控服务
         startLiveMonitor(ctx);
+
+        // 6. 启动动态监控服务
+        startDynamicMonitor(ctx);
 
         ctx.logger.info('插件初始化完成');
     } catch (error) {
@@ -65,6 +69,9 @@ export const plugin_cleanup: PluginModule['plugin_cleanup'] = async (ctx) => {
     try {
         // 停止直播监控服务
         stopLiveMonitor();
+
+        // 停止动态监控服务
+        stopDynamicMonitor();
 
         pluginState.cleanup();
         ctx.logger.info('插件已卸载');
