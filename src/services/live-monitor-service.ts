@@ -130,6 +130,7 @@ export class LiveMonitorService {
     /** 发送开播通知 */
     private async sendLiveStartNotification(streamer: Streamer, status: LiveRoomStatus): Promise<void> {
         const message = [
+            `【开播提醒】`,
             `${streamer.uname} 开播啦！`,
             `标题：${status.title}`,
             `分区: ${status.parentAreaName} - ${status.areaName}`,
@@ -145,7 +146,7 @@ export class LiveMonitorService {
     /** 发送下播通知 */
     private async sendLiveEndNotification(streamer: Streamer, startTime: number): Promise<void> {
         const duration = this.formatDuration(startTime);
-        const message = `${streamer.uname}下播了\n本次直播时长: ${duration}`;
+        const message = `【下播提醒】\n${streamer.uname}下播了\n本次直播时长: ${duration}`;
 
         await this.notificationService.sendToSubscribers(streamer.uid, { text: message });
     }

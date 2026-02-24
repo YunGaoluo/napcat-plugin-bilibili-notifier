@@ -4,7 +4,9 @@
       "Bash(git config --global --get:*)",
       "Bash(git push:*)",
       "Bash(git fetch:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(dir:*)",
+      "Bash(npm run typecheck:*)"
     ]
   }
 }

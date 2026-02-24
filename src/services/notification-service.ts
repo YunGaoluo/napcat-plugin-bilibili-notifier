@@ -31,21 +31,10 @@ export class NotificationService {
             return;
         }
 
-        // 构建消息段
-        const messageSegments: OB11PostSendMsg['message'] = [
-            { type: 'text', data: { text: message.text } },
-        ];
-
-        if (message.image) {
-            messageSegments.push({
-                type: 'image',
-                data: { file: message.image, url: message.image },
-            });
-        }
-
-        // 发送到群
+        // 发送到群（每个群单独构建消息，根据enableAtAll决定是否@全体）
         for (const group of groups) {
             try {
+                const messageSegments = this.buildMessageSegments(message, group.enableAtAll);
                 await this.sendToGroup(group.groupId, messageSegments);
                 this.ctx.logger.debug(`通知已发送到群 ${group.groupId}`);
             } catch (error) {
@@ -53,15 +42,44 @@ export class NotificationService {
             }
         }
 
-        // 发送到用户
+        // 发送到用户（用户私聊不需要@全体）
+        const userMessageSegments = this.buildMessageSegments(message, false);
         for (const user of users) {
             try {
-                await this.sendToUser(user.userId, messageSegments);
+                await this.sendToUser(user.userId, userMessageSegments);
                 this.ctx.logger.debug(`通知已发送给用户 ${user.userId}`);
             } catch (error) {
                 this.ctx.logger.error(`发送通知给用户 ${user.userId} 失败:`, error);
             }
         }
+    }
+
+    /**
+     * 构建消息段
+     * @param message 消息内容
+     * @param atAll 是否@全体
+     */
+    private buildMessageSegments(message: NotificationMessage, atAll: boolean): OB11PostSendMsg['message'] {
+        const segments: OB11PostSendMsg['message'] = [];
+
+        // 如果开启@全体，添加@全体消息段
+        if (atAll) {
+            segments.push({ type: 'at', data: { qq: 'all' } });
+            segments.push({ type: 'text', data: { text: '\n' } });
+        }
+
+        // 添加文本消息
+        segments.push({ type: 'text', data: { text: message.text } });
+
+        // 添加图片（如果有）
+        if (message.image) {
+            segments.push({
+                type: 'image',
+                data: { file: message.image, url: message.image },
+            });
+        }
+
+        return segments;
     }
 
     /**

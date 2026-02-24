@@ -433,7 +433,7 @@ async function handleList(
         const streamers = storage.getUserSubscribedStreamers(userId);
 
         if (streamers.length === 0) {
-            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' sub <UID> 来订阅');
+            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅');
             return;
         }
 
