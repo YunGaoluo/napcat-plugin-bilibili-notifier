@@ -204,6 +204,11 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
                     ``,
                     `【群管理】`,
                     `${COMMAND_PREFIX} atall on/off - 开启/关闭@全体`,
+                    ``,
+                    `【示例】`,
+                    `${COMMAND_PREFIX} 订阅 UID:407800065`,
+                    `${COMMAND_PREFIX} 订阅 407800065`,
+                    `${COMMAND_PREFIX} 删除 UID:407800065`,
                 ].join('\n');
                 await sendReply(ctx, event, helpText);
                 break;
@@ -248,12 +253,43 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
     }
 }
 
+/**
+ * 解析 UID 参数
+ * 支持两种格式：
+ * 1. UID:xxx 格式，如 "UID:407800065"
+ * 2. 纯数字格式，如 "407800065"
+ * @param arg 参数字符串
+ * @returns 解析后的UID数字，如果格式不正确则返回null
+ */
+function parseUidArg(arg: string): number | null {
+    // 首先尝试匹配 UID: 开头格式
+    const uidPrefixMatch = arg.match(/^UID:(\d+)$/i);
+    if (uidPrefixMatch) {
+        const uid = parseInt(uidPrefixMatch[1], 10);
+        if (!isNaN(uid) && uid > 0) {
+            return uid;
+        }
+    }
+
+    // 然后尝试匹配纯数字格式
+    const numberMatch = arg.match(/^\d+$/);
+    if (numberMatch) {
+        const uid = parseInt(arg, 10);
+        if (!isNaN(uid) && uid > 0) {
+            return uid;
+        }
+    }
+
+    return null;
+}
+
 
 // ==================== 业务逻辑 ====================
 
 /**
  * 处理订阅命令
  * 支持群订阅和用户私聊订阅
+ * 格式: #blive 订阅 UID:407800065
  */
 async function handleSubscribe(
     ctx: NapCatPluginContext,
@@ -261,13 +297,14 @@ async function handleSubscribe(
     args: string[],
 ): Promise<void> {
     if (args.length === 0) {
-        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} sub <UID>\n例如: ${COMMAND_PREFIX} sub 123456`);
+        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} 订阅 UID:<数字>\n例如: ${COMMAND_PREFIX} 订阅 UID:407800065`);
         return;
     }
 
-    const uid = parseInt(args[0], 10);
-    if (isNaN(uid) || uid <= 0) {
-        await sendReply(ctx, event, '请输入有效的UID');
+    // 解析 UID 参数
+    const uid = parseUidArg(args[0]);
+    if (uid === null) {
+        await sendReply(ctx, event, '格式错误，UID必须是数字\n例如: 407800065 或 UID:407800065');
         return;
     }
 
@@ -326,6 +363,7 @@ async function handleSubscribe(
 
 /**
  * 处理取消订阅命令
+ * 格式: #blive 删除 UID:407800065
  */
 async function handleUnsubscribe(
     ctx: NapCatPluginContext,
@@ -333,13 +371,14 @@ async function handleUnsubscribe(
     args: string[],
 ): Promise<void> {
     if (args.length === 0) {
-        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} unsub <UID>\n例如: ${COMMAND_PREFIX} unsub 123456`);
+        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} 删除 UID:<数字>\n例如: ${COMMAND_PREFIX} 删除 UID:407800065`);
         return;
     }
 
-    const uid = parseInt(args[0], 10);
-    if (isNaN(uid) || uid <= 0) {
-        await sendReply(ctx, event, '请输入有效的UID');
+    // 解析 UID 参数
+    const uid = parseUidArg(args[0]);
+    if (uid === null) {
+        await sendReply(ctx, event, '格式错误，UID必须是数字\n例如: 407800065 或 UID:407800065');
         return;
     }
 
@@ -396,7 +435,7 @@ async function handleList(
         const groupSub = storage.getGroupSub(groupId);
 
         if (streamers.length === 0) {
-            await sendReply(ctx, event, '本群还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅');
+            await sendReply(ctx, event, '本群还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅\n例如: ' + COMMAND_PREFIX + ' 订阅 407800065');
             return;
         }
 
@@ -433,7 +472,7 @@ async function handleList(
         const streamers = storage.getUserSubscribedStreamers(userId);
 
         if (streamers.length === 0) {
-            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅');
+            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅\n例如: ' + COMMAND_PREFIX + ' 订阅 407800065');
             return;
         }
 
