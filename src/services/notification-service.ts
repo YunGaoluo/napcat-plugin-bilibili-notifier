@@ -22,8 +22,11 @@ export class NotificationService {
 
     /**
      * 发送通知给订阅了主播的所有群和用户
+     * @param uid 主播UID
+     * @param message 消息内容
+     * @param atAll 是否@全体，不传则使用群设置
      */
-    async sendToSubscribers(uid: number, message: NotificationMessage): Promise<void> {
+    async sendToSubscribers(uid: number, message: NotificationMessage, atAll?: boolean): Promise<void> {
         const groups = storage.getStreamerEnabledGroups(uid);
         const users = storage.getStreamerSubscribedUsers(uid);
 
@@ -34,7 +37,9 @@ export class NotificationService {
         // 发送到群（每个群单独构建消息，根据enableAtAll决定是否@全体）
         for (const group of groups) {
             try {
-                const messageSegments = this.buildMessageSegments(message, group.enableAtAll);
+                // 如果传入了atAll参数则使用，否则使用群设置
+                const shouldAtAll = atAll !== undefined ? atAll : group.enableAtAll;
+                const messageSegments = this.buildMessageSegments(message, shouldAtAll);
                 await this.sendToGroup(group.groupId, messageSegments);
                 this.ctx.logger.debug(`通知已发送到群 ${group.groupId}`);
             } catch (error) {

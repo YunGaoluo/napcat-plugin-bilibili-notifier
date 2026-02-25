@@ -148,7 +148,8 @@ export class LiveMonitorService {
         const duration = this.formatDuration(startTime);
         const message = `【下播提醒】\n${streamer.uname}下播了\n本次直播时长: ${duration}`;
 
-        await this.notificationService.sendToSubscribers(streamer.uid, { text: message });
+        // 下播通知不@全体
+        await this.notificationService.sendToSubscribers(streamer.uid, { text: message }, false);
     }
 
     /** 格式化直播时长 */

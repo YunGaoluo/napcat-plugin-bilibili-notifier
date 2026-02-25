@@ -27,11 +27,13 @@ const DYNAMIC_TYPE_NAMES: Record<DynamicType, string> = {
     DYNAMIC_TYPE_ARTICLE: '专栏',
     DYNAMIC_TYPE_MUSIC: '音频',
     DYNAMIC_TYPE_LIVE: '直播',
+    DYNAMIC_TYPE_LIVE_RCMD: '直播推荐',
 };
 
 /** 需要跳过的动态类型（不推送） */
 const SKIP_DYNAMIC_TYPES: DynamicType[] = [
-    DynamicType.LIVE,  // 直播开播动态不推送
+    DynamicType.LIVE,       // 直播开播动态不推送（已有直播监控处理）
+    DynamicType.LIVE_RCMD,  // 直播推荐动态不推送（动态流中的直播卡片）
 ];
 
 export class DynamicMonitorService {

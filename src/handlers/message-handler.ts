@@ -13,7 +13,7 @@ import type { OB11Message, OB11PostSendMsg } from 'napcat-types/napcat-onebot';
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { pluginState } from '../core/state';
 import {getLiveRoomStatusBatch} from "../services/bilibili-service";
-import {storage, Streamer} from "../core/storage";
+import {storage} from "../core/storage";
 
 // ==================== 命令解析 ====================
 

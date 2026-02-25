@@ -69,6 +69,8 @@ export enum DynamicType {
     MUSIC = 'DYNAMIC_TYPE_MUSIC',
     /** 直播 */
     LIVE = 'DYNAMIC_TYPE_LIVE',
+    /** 直播开播推荐（出现在动态流中的直播卡片） */
+    LIVE_RCMD = 'DYNAMIC_TYPE_LIVE_RCMD',
 }
 
 /** 动态作者信息 */
