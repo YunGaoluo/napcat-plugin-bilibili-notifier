@@ -481,6 +481,32 @@ test('subscribe commands are rate limited per conversation', async () => {
     assert.match(text(sent.at(-1)), /操作过于频繁/);
 });
 
+test('superuser can query global subscriptions from private chat', async () => {
+    seed(['100'], ['201']);
+    pluginState.updateConfig({ superusers: '200' });
+    await handleMessage(ctx, {
+        post_type: 'message', message_type: 'private', user_id: 200, raw_message: '#blive 订阅总览',
+    });
+    const reply = text(sent.at(-1));
+    assert.match(reply, /Test UP \(UID: 42\)/);
+    assert.match(reply, /群\(1\): 100/);
+    assert.match(reply, /私聊\(1\): 201/);
+    assert.match(reply, /主播 1 个 \| 群 1 个 \| 用户 1 个/);
+});
+
+test('global subscription overview rejects non-superusers and group usage', async () => {
+    seed(['100'], ['201']);
+    pluginState.updateConfig({ superusers: '200' });
+    await handleMessage(ctx, {
+        post_type: 'message', message_type: 'private', user_id: 201, raw_message: '#blive 订阅总览',
+    });
+    assert.match(text(sent.at(-1)), /只有主人/);
+
+    await handleMessage(ctx, groupEvent('#blive 订阅总览'));
+    assert.match(text(sent.at(-1)), /仅支持主人私聊/);
+    assert.equal(sent.some(params => /Test UP \(UID: 42\)/.test(text(params))), false);
+});
+
 test('long subscription lists are split across messages', async () => {
     seed(['100']);
     for (let index = 1; index <= 49; index += 1) {

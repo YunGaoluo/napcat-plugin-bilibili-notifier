@@ -173,39 +173,28 @@ export async function sendForwardMsg(
 
 // ==================== 权限检查 ====================
 
+/** 判断发送者是否是配置中的主人 QQ。 */
+export function isSuperuser(event: OB11Message): boolean {
+    const userId = String(event.user_id ?? '');
+    if (!userId) return false;
+    const superusers = String(pluginState.config?.superusers ?? '')
+        .split(/[,，]/)
+        .map(value => value.trim())
+        .filter(Boolean);
+    return superusers.includes(userId);
+}
+
 /**
  * 检查是否有管理员权限
  * - 群聊中：群主、管理员或配置的 superusers 之一
  * - 私聊消息：默认返回 true（同时会检查 superusers）
  */
 export function isAdmin(event: OB11Message): boolean {
-    const userId = String(event.user_id ?? '');
     const role = (event.sender as Record<string, unknown>)?.role;
-
-    // 检查是否是群管理员/群主
     if (event.message_type === 'group' && (role === 'admin' || role === 'owner')) {
         return true;
     }
-
-    // 检查当前用户是否在配置的超级管理员（superusers）列表中
-    // superusers 配置在插件 config.json 中，支持逗号或中文逗号分隔
-    try {
-        const superusersRaw = pluginState.config?.superusers ?? '';
-
-        const superusers = String(superusersRaw)
-            .split(/[,，]/)
-            .map(s => s.trim())
-            .filter(Boolean);
-            
-        // 如果 userId 存在且在超级管理员列表中，则拥有权限
-        if (userId && superusers.includes(userId)) {
-            return true;
-        }
-    } catch {
-        // 捕获可能的异常（如配置对象未初始化等），此时忽略超级管理员检查
-        // 防止因配置问题导致权限判断崩溃
-    }
-
+    if (isSuperuser(event)) return true;
     // 私聊默认放行（兼容原有逻辑），群聊则拒绝
     return event.message_type !== 'group';
 }
@@ -242,6 +231,9 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
                     `【群管理】`,
                     `${pluginState.config.commandPrefix} atall on/off - 开启/关闭@全体`,
                     ``,
+                    `【主人】`,
+                    `${pluginState.config.commandPrefix} 订阅总览 - 查看全局订阅情况(仅主人私聊)`,
+                    ``,
                     `【示例】`,
                     `${pluginState.config.commandPrefix} 订阅 UID:407800065`,
                     `${pluginState.config.commandPrefix} 订阅 407800065`,
@@ -277,6 +269,14 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
             case 'atall':
             case '全体': {
                 await handleAtAll(ctx, event, args);
+                pluginState.incrementProcessed();
+                break;
+            }
+
+            case '订阅总览':
+            case '总览':
+            case 'alllist': {
+                await handleAllSubscriptions(ctx, event);
                 pluginState.incrementProcessed();
                 break;
             }
@@ -520,15 +520,15 @@ async function handleUnsubscribe(
     }
 }
 
-/** 按消息长度切分订阅列表，避免单条消息超过平台限制后被静默丢弃。 */
-async function sendStreamerList(
+/** 按消息长度切分内容发送，避免单条消息超过平台限制后被静默丢弃。 */
+async function sendChunkedMessage(
     ctx: NapCatPluginContext,
     event: OB11Message,
-    title: string,
-    streamers: Streamer[],
+    header: string,
+    blocks: string[],
     footer: string[] = [],
 ): Promise<void> {
-    let buffer = `[= ${title} =]\n共 ${streamers.length} 个主播\n`;
+    let buffer = header;
     const flush = async (): Promise<boolean> => {
         if (!buffer) return true;
         const sent = await sendReply(ctx, event, buffer);
@@ -536,23 +536,89 @@ async function sendStreamerList(
         return sent;
     };
 
-    for (let i = 0; i < streamers.length; i++) {
-        const streamer = streamers[i];
-        const status = streamer.liveStatus === 1 ? '直播中' : streamer.liveStatus === 2 ? '轮播中' : '未开播';
-        let block = `\n${i + 1}. ${streamer.uname}\n   UID: ${streamer.uid} | ${status}\n`;
-        if (streamer.liveStatus === 1 && streamer.liveTime > 0) {
-            block += `   已开播: ${Math.floor((Date.now() / 1000 - streamer.liveTime) / 60)} 分钟\n`;
-        }
-        block += `   https://live.bilibili.com/${streamer.roomId}\n`;
+    for (const block of blocks) {
         if (buffer.length + block.length > LIST_CHUNK_LIMIT && !await flush()) return;
         buffer += block;
     }
-
     for (const line of footer) {
         if (buffer.length + line.length + 1 > LIST_CHUNK_LIMIT && !await flush()) return;
         buffer += line + '\n';
     }
     await flush();
+}
+
+/** 发送主播订阅列表，超长时自动分片。 */
+async function sendStreamerList(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    title: string,
+    streamers: Streamer[],
+    footer: string[] = [],
+): Promise<void> {
+    const blocks = streamers.map((streamer, index) => {
+        const status = streamer.liveStatus === 1 ? '直播中' : streamer.liveStatus === 2 ? '轮播中' : '未开播';
+        let block = `\n${index + 1}. ${streamer.uname}\n   UID: ${streamer.uid} | ${status}\n`;
+        if (streamer.liveStatus === 1 && streamer.liveTime > 0) {
+            block += `   已开播: ${Math.floor((Date.now() / 1000 - streamer.liveTime) / 60)} 分钟\n`;
+        }
+        return block + `   https://live.bilibili.com/${streamer.roomId}\n`;
+    });
+    await sendChunkedMessage(ctx, event, `[= ${title} =]\n共 ${streamers.length} 个主播\n`, blocks, footer);
+}
+
+/** 主人私聊查询：每个主播被哪些群和用户订阅。 */
+async function handleAllSubscriptions(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+): Promise<void> {
+    if (event.message_type !== 'private') {
+        await sendReply(ctx, event, '此命令仅支持主人私聊使用');
+        return;
+    }
+    if (!isSuperuser(event)) {
+        await sendReply(ctx, event, '只有主人才能使用此命令');
+        return;
+    }
+
+    const rows = storage.getAllStreamers()
+        .map(streamer => ({
+            streamer,
+            groups: storage.getStreamerSubscribedGroups(streamer.uid),
+            users: storage.getStreamerSubscribedUsers(streamer.uid),
+        }))
+        .filter(row => row.groups.length + row.users.length > 0)
+        .sort((a, b) =>
+            (b.groups.length + b.users.length) - (a.groups.length + a.users.length)
+            || a.streamer.uid - b.streamer.uid);
+
+    if (rows.length === 0) {
+        await sendReply(ctx, event, '当前没有任何群或用户订阅主播');
+        return;
+    }
+
+    const groupCount = new Set(rows.flatMap(row => row.groups.map(group => group.groupId))).size;
+    const userCount = new Set(rows.flatMap(row => row.users.map(user => user.userId))).size;
+    const blocks = rows.map(({ streamer, groups, users }) => {
+        let block = `\n${streamer.uname} (UID: ${streamer.uid})\n`;
+        if (groups.length > 0) {
+            const labels = groups.map(group =>
+                !group.enabled || !pluginState.isGroupEnabled(group.groupId)
+                    ? `${group.groupId}(已暂停)`
+                    : group.groupId);
+            block += `  群(${groups.length}): ${labels.join(', ')}\n`;
+        }
+        if (users.length > 0) {
+            block += `  私聊(${users.length}): ${users.map(user => user.userId).join(', ')}\n`;
+        }
+        return block;
+    });
+
+    await sendChunkedMessage(
+        ctx,
+        event,
+        `[= 全局订阅总览 =]\n主播 ${rows.length} 个 | 群 ${groupCount} 个 | 用户 ${userCount} 个\n`,
+        blocks,
+    );
 }
 
 /**
