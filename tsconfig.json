@@ -4,6 +4,10 @@
         "module": "ESNext",
         "moduleResolution": "bundler",
         "baseUrl": ".",
+        "paths": {
+            "napcat-types": [".napcat-types/napcat-types/index.d.ts"],
+            "napcat-types/*": [".napcat-types/*"]
+        },
         "strict": true,
         "esModuleInterop": true,
         "skipLibCheck": true,

@@ -6,6 +6,7 @@
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 import cron from 'node-cron';
 import type { ScheduledTask } from 'node-cron';
+import { setTimeout as delay } from 'node:timers/promises';
 import { pluginState } from '../core/state';
 import { storage } from '../core/storage';
 import { getUserDynamics } from './bilibili-service';
@@ -14,8 +15,8 @@ import { createNotificationService, type NotificationService } from './notificat
 
 /** 动态缓存 */
 interface DynamicCache {
-    /** 上次检查时间戳（毫秒） */
-    lastCheckTime: number;
+    /** 已处理的动态 ID，不依赖发布时间与本机时钟。 */
+    seenIds: string[];
 }
 
 /** 动态类型显示映射 */
@@ -42,6 +43,8 @@ export class DynamicMonitorService {
     private cronJob: ScheduledTask | null = null;
     private isRunning: boolean = false;
     private dynamicCache: Map<number, DynamicCache> = new Map();
+    private inFlight: Promise<void> | null = null;
+    private controller: AbortController | null = null;
 
     constructor(ctx: NapCatPluginContext) {
         this.ctx = ctx;
@@ -60,105 +63,95 @@ export class DynamicMonitorService {
         this.isRunning = true;
 
         // 立即执行一次检查
-        this.checkAllStreamers();
+        void this.checkAllStreamers();
 
         // 每分钟检查一次（动态更新频率不需要太高）
         this.cronJob = cron.schedule('0 * * * * *', () => {
-            this.checkAllStreamers();
+            void this.checkAllStreamers();
         });
     }
 
     /** 停止动态监控 */
-    stop(): void {
-        if (!this.isRunning) return;
-
-        this.ctx.logger.info('停止动态监控服务');
-        this.cronJob?.stop();
-        this.cronJob = null;
-        this.saveCache();
+    async stop(): Promise<void> {
         this.isRunning = false;
+        this.cronJob?.stop();
+        for (const [id, task] of cron.getTasks()) {
+            if (task === this.cronJob) {
+                cron.getTasks().delete(id);
+                task.removeAllListeners();
+                break;
+            }
+        }
+        this.cronJob = null;
+        this.controller?.abort();
+        await this.inFlight;
+        this.saveCache();
     }
 
     /** 检查所有订阅的主播 */
-    private async checkAllStreamers(): Promise<void> {
-        try {
-            const subscribedStreamers = storage.getAllStreamers()
-                .filter(s => storage.hasAnySubscribers(s.uid));
+    private checkAllStreamers(): Promise<void> {
+        if (this.inFlight) return this.inFlight;
+        if (!this.isRunning || !pluginState.config.enabled) return Promise.resolve();
+        const controller = new AbortController();
+        this.controller = controller;
+        this.inFlight = this.runCheck(controller.signal).catch(error => {
+            if (!controller.signal.aborted) this.ctx.logger.error('检查动态更新失败:', error);
+        }).finally(() => {
+            this.inFlight = null;
+            this.controller = null;
+        });
+        return this.inFlight;
+    }
 
-            if (subscribedStreamers.length === 0) return;
-
-            for (const streamer of subscribedStreamers) {
-                await this.checkStreamerDynamic(streamer.uid);
-                // 添加短暂延迟避免请求过快
-                await this.delay(1000);
+    private async runCheck(signal: AbortSignal): Promise<void> {
+        await this.notificationService.flush(signal);
+        const streamers = storage.getAllStreamers().filter(streamer =>
+            storage.getStreamerEnabledGroups(streamer.uid).length > 0
+            || storage.getStreamerSubscribedUsers(streamer.uid).length > 0
+        );
+        for (let i = 0; i < streamers.length; i++) {
+            if (signal.aborted || !pluginState.config.enabled) return;
+            try {
+                await this.checkStreamerDynamic(streamers[i].uid, signal);
+            } catch (error) {
+                if (signal.aborted) return;
+                this.ctx.logger.error(`检查用户 ${streamers[i].uid} 动态失败:`, error);
             }
-
-            this.saveCache();
-        } catch (error) {
-            this.ctx.logger.error('检查动态更新失败:', error);
+            if (i + 1 < streamers.length) await delay(1000, undefined, { signal });
         }
+        await this.notificationService.flush(signal);
     }
 
     /** 检查单个主播的最新动态 */
-    private async checkStreamerDynamic(uid: number): Promise<void> {
+    private async checkStreamerDynamic(uid: number, signal?: AbortSignal): Promise<void> {
+        if (!pluginState.config.enabled || signal?.aborted) return;
         const streamer = storage.getStreamer(uid);
         if (!streamer) return;
-
-        // 获取用户动态列表
-        const dynamics = await getUserDynamics(uid);
-        if (dynamics.length === 0) return;
-
-        const now = Date.now();
         const cache = this.dynamicCache.get(uid);
-
-        // 首次检查，只记录不推送
-        if (!cache) {
-            this.dynamicCache.set(uid, {
-                lastCheckTime: now,
-            });
-            this.ctx.logger.debug(`[动态] 初始化 ${streamer.uname} 的动态缓存`);
+        const seen = cache ? new Set(cache.seenIds) : undefined;
+        const dynamics = await getUserDynamics(uid, seen, signal);
+        if (signal?.aborted || !pluginState.config.enabled) return;
+        if (!seen) {
+            this.dynamicCache.set(uid, { seenIds: dynamics.map(dynamic => dynamic.id) });
+            this.saveCache();
+            if (pluginState.config.debug) this.ctx.logger.debug(`[动态] 初始化 ${streamer.uname} 的动态缓存`);
             return;
         }
-
-        // 根据发布时间找出所有新动态
-        const newDynamics = this.findNewDynamicsByTime(dynamics, cache.lastCheckTime);
-
-        // 过滤掉不需要推送的类型（如直播）
-        const filteredDynamics = newDynamics.filter(dynamic => !SKIP_DYNAMIC_TYPES.includes(dynamic.type));
-
-        if (filteredDynamics.length > 0) {
-            // 按时间正序推送（先发旧的，再发新的）
-            for (let i = filteredDynamics.length - 1; i >= 0; i--) {
-                const dynamic = filteredDynamics[i];
+        dynamics.sort((a, b) => a.author.pub_ts - b.author.pub_ts);
+        for (const dynamic of dynamics) {
+            if (seen.has(dynamic.id)) continue;
+            if (!SKIP_DYNAMIC_TYPES.includes(dynamic.type)) {
+                this.enqueueDynamicNotification(uid, dynamic);
                 this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
-                await this.sendDynamicNotification(uid, dynamic);
             }
+            seen.add(dynamic.id);
         }
-
-        // 记录被跳过的动态
-        const skippedCount = newDynamics.length - filteredDynamics.length;
-        if (skippedCount > 0) {
-            this.ctx.logger.debug(`[动态] ${streamer.uname}: 跳过 ${skippedCount} 条直播动态`);
-        }
-
-        // 更新缓存
-        cache.lastCheckTime = now;
-        this.dynamicCache.set(uid, cache);
-    }
-
-    /**
-     * 根据发布时间找出所有新动态
-     * @param dynamics 动态列表
-     * @param lastCheckTime 上次检查时间（毫秒）
-     * @returns 发布时间在上次检查时间之后的动态
-     */
-    private findNewDynamicsByTime(dynamics: DynamicInfo[], lastCheckTime: number): DynamicInfo[] {
-        // pub_ts 是秒级时间戳，需要转换为毫秒进行比较
-        return dynamics.filter(dynamic => dynamic.author.pub_ts * 1000 > lastCheckTime);
+        this.dynamicCache.set(uid, { seenIds: [...seen] });
+        this.saveCache();
     }
 
     /** 发送动态通知 */
-    private async sendDynamicNotification(uid: number, dynamic: DynamicInfo): Promise<void> {
+    private enqueueDynamicNotification(uid: number, dynamic: DynamicInfo): void {
         const streamer = storage.getStreamer(uid);
         if (!streamer) return;
 
@@ -173,10 +166,10 @@ export class DynamicMonitorService {
             image = dynamic.draw.items[0].src;
         }
 
-        await this.notificationService.sendToSubscribers(uid, {
+        this.notificationService.enqueue(`dynamic:${uid}:${dynamic.id}`, uid, {
             text: message,
             image,
-        });
+        }, false);
     }
 
     /** 构建动态消息文本 */
@@ -223,16 +216,14 @@ export class DynamicMonitorService {
         return text.substring(0, maxLength) + '...';
     }
 
-    /** 延迟函数 */
-    private delay(ms: number): Promise<void> {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
 
     /** 加载缓存 */
     private loadCache(): void {
         const cache = pluginState.loadDataFile<Record<string, DynamicCache>>('dynamic_cache.json', {});
         for (const [uid, data] of Object.entries(cache)) {
-            this.dynamicCache.set(Number(uid), data);
+            if (data && Array.isArray(data.seenIds) && data.seenIds.every(id => typeof id === 'string')) {
+                this.dynamicCache.set(Number(uid), data);
+            }
         }
     }
 
@@ -261,9 +252,13 @@ export function startDynamicMonitor(ctx: NapCatPluginContext): DynamicMonitorSer
     return instance;
 }
 
-export function stopDynamicMonitor(): void {
-    instance?.stop();
-    instance = null;
+export async function stopDynamicMonitor(): Promise<void> {
+    const current = instance;
+    try {
+        await current?.stop();
+    } finally {
+        if (instance === current) instance = null;
+    }
 }
 
 export function getDynamicMonitor(): DynamicMonitorService | null {

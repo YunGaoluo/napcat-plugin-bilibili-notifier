@@ -1,0 +1,2 @@
+patchedDependencies:
+  napcat-types@0.0.16: patches/napcat-types@0.0.16.patch

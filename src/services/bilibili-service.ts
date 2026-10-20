@@ -10,6 +10,11 @@ import { pluginState } from '../core/state';
 /** 请求超时（毫秒） */
 const REQUEST_TIMEOUT = 10000;
 
+function requestSignal(signal?: AbortSignal): AbortSignal {
+    const timeout = AbortSignal.timeout(REQUEST_TIMEOUT);
+    return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** B站请求Headers */
 const BILI_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -22,7 +27,7 @@ const BILI_HEADERS = {
  * @param uids UP主UID数组
  * @returns Promise<Map<number, LiveRoomStatus>> 返回包含直播间状态的Map，key为UID
  */
-export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number, LiveRoomStatus>> {
+export async function getLiveRoomStatusBatch(uids: number[], signal?: AbortSignal): Promise<Map<number, LiveRoomStatus>> {
     // 初始化结果Map，用于存储查询到的直播间状态
     const result = new Map<number, LiveRoomStatus>();
 
@@ -38,6 +43,7 @@ export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number
         // 发起GET请求到B站API
         const response = await fetch(url, {
             method: 'GET',
+            signal: requestSignal(signal),
             headers: {
                 ...BILI_HEADERS,  // 使用预定义的请求头
             },
@@ -102,10 +108,9 @@ export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number
         }
 
         // 输出详细日志
-        pluginState.logger.debug(`(｡･ω･｡) 获取 ${result.size}/${uids.length} 个直播间状态`);
+        if (pluginState.config.debug) pluginState.logger.debug(`获取 ${result.size}/${uids.length} 个直播间状态`);
     } catch (error) {
-        // 捕获并记录所有异常错误
-        pluginState.logger.error('(╥﹏╥) 获取直播间状态失败:', error);
+        throw error;
     }
     // 返回最终的直播间状态结果
     return result;
@@ -113,73 +118,44 @@ export async function getLiveRoomStatusBatch(uids: number[]): Promise<Map<number
 
 // ==================== 动态相关 API ====================
 
-/**
- * 获取用户空间动态列表
- * API: https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space
- * @param uid 用户UID
- * @returns 动态列表（按时间倒序，最新的在最前面）
- */
-export async function getUserDynamics(uid: number): Promise<DynamicInfo[]> {
+/** 首次只读首页建立基线；随后向后翻页，直到遇到整页已知动态或读完。 */
+export async function getUserDynamics(
+    uid: number, knownIds?: ReadonlySet<string>, signal?: AbortSignal,
+): Promise<DynamicInfo[]> {
     const result: DynamicInfo[] = [];
-
-    const startTime = Date.now();
-
-    try {
-        const url = `https://api.bilibili.com/x/polymer/web-dynamic/desktop/v1/feed/space?host_mid=${uid}`;
-
-        // 记录请求日志（包含请求头）
-        const requestHeaders = { ...BILI_HEADERS };
-        pluginState.logger.debug(`(｡･ω･｡) 获取用户动态列表请求: uid=${uid}, url=${url}, headers=${JSON.stringify(requestHeaders)}`);
-
+    const offsets = new Set<string>();
+    const ids = new Set<string>();
+    let offset = '';
+    while (true) {
+        signal?.throwIfAborted();
+        const url = new URL('https://api.bilibili.com/x/polymer/web-dynamic/desktop/v1/feed/space');
+        url.searchParams.set('host_mid', String(uid));
+        if (offset) url.searchParams.set('offset', offset);
         const response = await fetch(url, {
-            method: 'GET',
-            headers: requestHeaders,
+            method: 'GET', headers: BILI_HEADERS, signal: requestSignal(signal),
         });
-
-        if (!response.ok) {
-            pluginState.logger.error(`(╥﹏╥) 获取用户动态列表响应错误: HTTP ${response.status}`);
-            throw new Error(`HTTP ${response.status}`);
-        }
-
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json() as ApiResponse<{
             items: DynamicItemRaw[];
+            has_more?: boolean | number;
+            offset?: string;
         }>;
-
-        // 记录响应日志（包含完整响应数据）
-        pluginState.logger.debug(`(｡･ω･｡) 获取用户动态列表响应: uid=${uid}, code=${data.code}, message=${data.message || 'success'}, items=${data.data?.items?.length ?? 0}`);
-        pluginState.logger.debug(`(｡･ω･｡) 响应数据: ${JSON.stringify(data, null, 2)}`);
-
-        if (data.code !== 0) {
-            throw new Error(`API Error: ${data.message}`);
+        if (data.code !== 0) throw new Error(`API Error: ${data.message}`);
+        if (!data.data || !Array.isArray(data.data.items)) throw new Error('动态接口返回无效数据');
+        const page = data.data;
+        for (const item of page.items) {
+            if (ids.has(item.id_str)) continue;
+            const dynamic = parseDynamicItem(item);
+            if (!dynamic) throw new Error(`动态 ${item.id_str} 解析失败`);
+            result.push(dynamic);
+            ids.add(item.id_str);
         }
-
-        if (!data.data?.items) {
-            pluginState.logger.warn(`(◕‿◕) 用户 ${uid} 动态列表为空`);
-            return result;
-        }
-
-        // 解析动态列表
-        for (const item of data.data.items) {
-            try {
-                const dynamic = parseDynamicItem(item);
-                if (dynamic !== undefined) {
-                    result.push(dynamic);
-                    pluginState.logger.debug(`(｡･ω･｡) 解析动态成功: id=${dynamic.id}, type=${dynamic.type}, author=${dynamic.author.name}`);
-                } else {
-                    pluginState.logger.warn(`(◕‿◕) 解析动态失败: id=${item.id_str}, type=${item.type}`);
-                }
-            } catch (parseError) {
-                pluginState.logger.error(`(╥﹏╥) 解析动态异常: id=${item.id_str}, type=${item.type}, error=`, parseError);
-            }
-        }
-
-        const duration = Date.now() - startTime;
-        pluginState.logger.debug(`(✿◠‿◠) 获取用户动态列表完成: uid=${uid}, 成功解析=${result.length}条, 原始数据=${data.data.items.length}条, 耗时=${duration}ms`);
-    } catch (error) {
-        const duration = Date.now() - startTime;
-        pluginState.logger.error(`(╥﹏╥) 获取用户 ${uid} 动态失败, 耗时=${duration}ms:`, error);
+        if (pluginState.config.debug) pluginState.logger.debug(`获取用户 ${uid} 动态: 本页 ${page.items.length} 条`);
+        if (!knownIds || !page.has_more || page.items.every(item => knownIds.has(item.id_str))) break;
+        if (!page.offset || offsets.has(page.offset)) throw new Error('动态接口分页游标未推进');
+        offsets.add(page.offset);
+        offset = page.offset;
     }
-
     return result;
 }
 

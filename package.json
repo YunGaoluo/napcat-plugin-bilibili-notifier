@@ -3,6 +3,7 @@
   "plugin": "B站直播动态推送插件",
   "version": "1.1.0",
   "type": "module",
+  "packageManager": "pnpm@10.28.2",
   "main": "index.mjs",
   "description": "将B站直播动态投稿信息推送至QQ群",
   "author": "妘皋落",
@@ -38,12 +39,11 @@
   },
   "scripts": {
     "build": "vite build",
-    "build:webui": "cd src/webui && pnpm install && pnpm run build",
-    "dev:webui": "cd src/webui && pnpm run dev",
     "watch": "vite build --watch",
-    "dev": "vite build --watch",
-    "push": "vite build",
-    "deploy": "vite build",
-    "typecheck": "tsc --noEmit"
+    "dev": "vite build --watch --mode deploy",
+    "push": "vite build --mode deploy",
+    "deploy": "vite build --mode deploy",
+    "typecheck": "node scripts/prepare-napcat-types.mjs && tsc --noEmit",
+    "test": "node --import ./tests/register.mjs --test"
   }
 }

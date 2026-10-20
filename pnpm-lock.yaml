@@ -4,13 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  napcat-types@0.0.16:
+    hash: fe9e1a85ba2b0baf14ca19c0dea3a7016d5058efc455de9279a2b2864d68d062
+    path: patches/napcat-types@0.0.16.patch
+
 importers:
 
   .:
     dependencies:
       napcat-types:
         specifier: 0.0.16
-        version: 0.0.16
+        version: 0.0.16(patch_hash=fe9e1a85ba2b0baf14ca19c0dea3a7016d5058efc455de9279a2b2864d68d062)
       node-cron:
         specifier: ^3.0.3
         version: 3.0.3
@@ -847,7 +852,7 @@ snapshots:
     optionalDependencies:
       vite: 6.4.1(@types/node@20.19.33)
 
-  napcat-types@0.0.16:
+  napcat-types@0.0.16(patch_hash=fe9e1a85ba2b0baf14ca19c0dea3a7016d5058efc455de9279a2b2864d68d062):
     dependencies:
       '@sinclair/typebox': 0.34.48
       '@types/node': 22.19.10

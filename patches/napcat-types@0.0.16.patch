@@ -1,0 +1,25 @@
+diff --git a/napcat-core/packet/transformer/message/UploadForwardMsgV2.ts b/napcat-core/packet/transformer/message/UploadForwardMsgV2.ts
+index eb2c9d7f719925ae468a1adc57f49d7be55e152b..8a6e5343dad2f8495a03cca879ef2ba3c682c8df 100644
+--- a/napcat-core/packet/transformer/message/UploadForwardMsgV2.ts
++++ b/napcat-core/packet/transformer/message/UploadForwardMsgV2.ts
+@@ -7,16 +7,10 @@ export interface UploadForwardMsgParams {
+ }
+ declare class UploadForwardMsgV2 extends PacketTransformer<typeof proto.SendLongMsgResp> {
+     build(selfUid: string, msg: UploadForwardMsgParams[], groupUin?: number): OidbPacket;
+-    parse(data: Buffer): import("napcat-protobuf").any {
+-            resId: import("napcat-protobuf").ScalarProtoFieldType<import("napcat-protobuf").ScalarType.STRING, false, false>;
+-        }, false, false>;
+-        settings: import("napcat-protobuf").MessageProtoFieldType<() => {
+-            field1: import("napcat-protobuf").ScalarProtoFieldType<import("napcat-protobuf").ScalarType.UINT32, false, false>;
+-            field2: import("napcat-protobuf").ScalarProtoFieldType<import("napcat-protobuf").ScalarType.UINT32, false, false>;
+-            field3: import("napcat-protobuf").ScalarProtoFieldType<import("napcat-protobuf").ScalarType.UINT32, false, false>;
+-            field4: import("napcat-protobuf").ScalarProtoFieldType<import("napcat-protobuf").ScalarType.UINT32, false, false>;
+-        }, false, false>;
+-    }>;
++    parse(data: Buffer): {
++        result: { resId: string };
++        settings: { field1: number; field2: number; field3: number; field4: number };
++    };
+ }
+ declare const _default: UploadForwardMsgV2;
+ export default _default;

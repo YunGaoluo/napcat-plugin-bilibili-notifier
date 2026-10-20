@@ -25,6 +25,8 @@ export class LiveMonitorService {
     private cronJob: ScheduledTask | null = null;
     private isRunning: boolean = false;
     private liveCache: Map<number, StreamerLiveCache> = new Map();
+    private inFlight: Promise<void> | null = null;
+    private controller: AbortController | null = null;
 
     constructor(ctx: NapCatPluginContext) {
         this.ctx = ctx;
@@ -43,51 +45,75 @@ export class LiveMonitorService {
         this.isRunning = true;
 
         // 立即执行一次检查
-        this.checkAllStreamers();
+        void this.checkAllStreamers();
 
         // 每10秒检查一次
         this.cronJob = cron.schedule('*/10 * * * * *', () => {
-            this.checkAllStreamers();
+            void this.checkAllStreamers();
         });
     }
 
     /** 停止直播监控 */
-    stop(): void {
-        if (!this.isRunning) return;
-
-        this.ctx.logger.info('停止直播监控服务');
-        this.cronJob?.stop();
-        this.cronJob = null;
-        this.saveCache();
+    async stop(): Promise<void> {
         this.isRunning = false;
+        this.cronJob?.stop();
+        for (const [id, task] of cron.getTasks()) {
+            if (task === this.cronJob) {
+                cron.getTasks().delete(id);
+                task.removeAllListeners();
+                break;
+            }
+        }
+        this.cronJob = null;
+        this.controller?.abort();
+        await this.inFlight;
+        this.saveCache();
     }
 
     /** 检查所有订阅的主播 */
-    private async checkAllStreamers(): Promise<void> {
-        try {
-            const subscribedStreamers = storage.getAllStreamers()
-                .filter(s => storage.hasAnySubscribers(s.uid));
+    private checkAllStreamers(): Promise<void> {
+        if (this.inFlight) return this.inFlight;
+        if (!this.isRunning || !pluginState.config.enabled) return Promise.resolve();
+        const controller = new AbortController();
+        this.controller = controller;
+        this.inFlight = this.runCheck(controller.signal).catch(error => {
+            if (!controller.signal.aborted) this.ctx.logger.error('检查主播状态失败:', error);
+        }).finally(() => {
+            this.inFlight = null;
+            this.controller = null;
+        });
+        return this.inFlight;
+    }
 
-            if (subscribedStreamers.length === 0) return;
-
-            const uids = subscribedStreamers.map(s => s.uid);
-            const statusMap = await getLiveRoomStatusBatch(uids);
-
-            for (const streamer of subscribedStreamers) {
-                const status = statusMap.get(streamer.uid);
-                if (status) {
-                    await this.processStreamerStatus(streamer, status);
-                }
-            }
-
-            this.saveCache();
-        } catch (error) {
-            this.ctx.logger.error('检查主播状态失败:', error);
+    private async runCheck(signal: AbortSignal): Promise<void> {
+        await this.notificationService.flush(signal);
+        if (signal.aborted || !pluginState.config.enabled) return;
+        const subscribedStreamers = storage.getAllStreamers().filter(streamer =>
+            storage.getStreamerEnabledGroups(streamer.uid).length > 0
+            || storage.getStreamerSubscribedUsers(streamer.uid).length > 0
+        );
+        if (subscribedStreamers.length === 0) return;
+        const statusMap = await getLiveRoomStatusBatch(subscribedStreamers.map(streamer => streamer.uid), signal);
+        if (signal.aborted || !pluginState.config.enabled) return;
+        const updates: Streamer[] = [];
+        for (const streamer of subscribedStreamers) {
+            const status = statusMap.get(streamer.uid);
+            if (!status) continue;
+            const updated = {
+                ...streamer, liveStatus: status.liveStatus, liveTime: status.liveTime,
+                roomId: status.roomId, title: status.title, cover: status.cover,
+                face: status.face, uname: status.uname,
+            };
+            this.processStreamerStatus(updated, status);
+            updates.push(updated);
         }
+        if (updates.length > 0) storage.setStreamers(updates);
+        this.saveCache();
+        await this.notificationService.flush(signal);
     }
 
     /** 处理单个主播的状态变化 */
-    private async processStreamerStatus(streamer: Streamer, status: LiveRoomStatus): Promise<void> {
+    private processStreamerStatus(streamer: Streamer, status: LiveRoomStatus): void {
         const cache = this.liveCache.get(streamer.uid) ?? {
             lastLiveStatus: 0,
             lastLiveTime: 0,
@@ -96,16 +122,6 @@ export class LiveMonitorService {
         const oldStatus = cache.lastLiveStatus;
         const currentStatus = status.liveStatus;
 
-        // 更新主播信息
-        Object.assign(streamer, {
-            liveStatus: currentStatus,
-            liveTime: status.liveTime,
-            title: status.title,
-            cover: status.cover,
-            face: status.face,
-            uname: status.uname,
-        });
-        storage.setStreamer(streamer);
 
         // 检测状态变化：0=未开播, 1=直播中, 2=轮播中
         const wasLive = oldStatus === 1;
@@ -114,12 +130,12 @@ export class LiveMonitorService {
         if (!wasLive && isLive) {
             // 开播
             this.ctx.logger.info(`[开播] ${streamer.uname} (UID: ${streamer.uid})`);
-            await this.sendLiveStartNotification(streamer, status);
+            this.enqueueLiveStartNotification(streamer, status);
             cache.lastLiveTime = status.liveTime;
         } else if (wasLive && !isLive) {
             // 下播
             this.ctx.logger.info(`[下播] ${streamer.uname} (UID: ${streamer.uid})`);
-            await this.sendLiveEndNotification(streamer, cache.lastLiveTime);
+            this.enqueueLiveEndNotification(streamer, cache.lastLiveTime);
         }
 
         // 更新缓存
@@ -128,7 +144,7 @@ export class LiveMonitorService {
     }
 
     /** 发送开播通知 */
-    private async sendLiveStartNotification(streamer: Streamer, status: LiveRoomStatus): Promise<void> {
+    private enqueueLiveStartNotification(streamer: Streamer, status: LiveRoomStatus): void {
         const message = [
             `【开播提醒】`,
             `${streamer.uname} 开播啦！`,
@@ -137,19 +153,19 @@ export class LiveMonitorService {
             `https://live.bilibili.com/${status.roomId}`,
         ].join('\n');
 
-        await this.notificationService.sendToSubscribers(streamer.uid, {
+        this.notificationService.enqueue(`live:${streamer.uid}:start:${status.liveTime}`, streamer.uid, {
             text: message,
             image: streamer.cover,
-        });
+        }, true);
     }
 
     /** 发送下播通知 */
-    private async sendLiveEndNotification(streamer: Streamer, startTime: number): Promise<void> {
+    private enqueueLiveEndNotification(streamer: Streamer, startTime: number): void {
         const duration = this.formatDuration(startTime);
         const message = `【下播提醒】\n${streamer.uname}下播了\n本次直播时长: ${duration}`;
 
         // 下播通知不@全体
-        await this.notificationService.sendToSubscribers(streamer.uid, { text: message }, false);
+        this.notificationService.enqueue(`live:${streamer.uid}:end:${startTime}`, streamer.uid, { text: message }, false);
     }
 
     /** 格式化直播时长 */
@@ -201,9 +217,13 @@ export function startLiveMonitor(ctx: NapCatPluginContext): LiveMonitorService {
     return instance;
 }
 
-export function stopLiveMonitor(): void {
-    instance?.stop();
-    instance = null;
+export async function stopLiveMonitor(): Promise<void> {
+    const current = instance;
+    try {
+        await current?.stop();
+    } finally {
+        if (instance === current) instance = null;
+    }
 }
 
 export function getLiveMonitor(): LiveMonitorService | null {

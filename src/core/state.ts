@@ -1,11 +1,12 @@
 /**
  * 全局状态管理模块（单例模式）
  *
- * 封装插件的运行时状态，提供在项目任意位置访问
- * ctx、logger 等对象的能力，无需逐层传递参数。
+ * 封装插件的配置持久化和运行时状态，提供在项目任意位置访问
+ * ctx、config、logger 等对象的能力，无需逐层传递参数。
  *
  * 使用方法：
  *   import { pluginState } from '../core/state';
+ *   pluginState.config.enabled;       // 读取配置
  *   pluginState.ctx.logger.info(...); // 使用日志
  */
 
@@ -13,12 +14,65 @@ import fs from 'fs';
 import path from 'path';
 import type { NapCatPluginContext, PluginLogger } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { storage } from './storage';
+import { DEFAULT_CONFIG } from '../config';
+import type { PluginConfig, GroupConfig } from '../types';
+
+
+function isObject(v: unknown): v is Record<string, unknown> {
+    return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** 同目录替换，避免异常退出留下半个 JSON 文件。 */
+function writeJson(filePath: string, data: unknown): void {
+    const temporaryPath = filePath + '.tmp';
+    try {
+        fs.writeFileSync(temporaryPath, JSON.stringify(data, null, 2), 'utf-8');
+        fs.renameSync(temporaryPath, filePath);
+    } catch (error) {
+        try { fs.unlinkSync(temporaryPath); } catch { /* 保留原始写入错误。 */ }
+        throw error;
+    }
+}
+
+/**
+ * 配置清洗函数
+ * 确保从文件读取的配置符合预期类型，防止运行时错误
+ */
+function sanitizeConfig(raw: unknown): PluginConfig {
+    if (!isObject(raw)) return { ...DEFAULT_CONFIG, groupConfigs: {} };
+
+    const out: PluginConfig = { ...DEFAULT_CONFIG, groupConfigs: {} };
+
+    if (typeof raw.enabled === 'boolean') out.enabled = raw.enabled;
+    if (typeof raw.debug === 'boolean') out.debug = raw.debug;
+    if (typeof raw.commandPrefix === 'string' && raw.commandPrefix.trim()) {
+        out.commandPrefix = raw.commandPrefix.trim();
+    }
+    if (typeof raw.superusers === 'string') out.superusers = raw.superusers;
+
+    // 群配置清洗
+    if (isObject(raw.groupConfigs)) {
+        for (const [groupId, groupConfig] of Object.entries(raw.groupConfigs)) {
+            if (isObject(groupConfig)) {
+                const cfg: GroupConfig = {};
+                if (typeof groupConfig.enabled === 'boolean') cfg.enabled = groupConfig.enabled;
+                out.groupConfigs[groupId] = cfg;
+            }
+        }
+    }
+
+    return out;
+}
+
 
 // ==================== 插件全局状态类 ====================
 
 class PluginState {
     /** NapCat 插件上下文（init 后可用） */
     private _ctx: NapCatPluginContext | null = null;
+
+    /** 插件配置 */
+    config: PluginConfig = { ...DEFAULT_CONFIG };
 
     /** 插件启动时间戳 */
     startTime: number = 0;
@@ -55,7 +109,9 @@ class PluginState {
     init(ctx: NapCatPluginContext): void {
         this._ctx = ctx;
         this.startTime = Date.now();
+        this.loadConfig();
         this.ensureDataDir();
+
         storage.loadAll();
         this.fetchSelfId();
     }
@@ -64,16 +120,18 @@ class PluginState {
      * 获取机器人自身 QQ 号（异步，init 时自动调用）
      */
     private async fetchSelfId(): Promise<void> {
+        const ctx = this.ctx;
         try {
-            const res = await this.ctx.actions.call(
-                'get_login_info', {}, this.ctx.adapterName, this.ctx.pluginManager.config
+            const res = await ctx.actions.call(
+                'get_login_info', {}, ctx.adapterName, ctx.pluginManager.config
             ) as { user_id?: number | string };
+            if (this._ctx !== ctx) return;
             if (res?.user_id) {
                 this.selfId = String(res.user_id);
-                this.logger.debug('(｡·ω·｡) 机器人 QQ: ' + this.selfId);
+                if (this.config.debug) ctx.logger.debug('机器人 QQ: ' + this.selfId);
             }
         } catch (e) {
-            this.logger.warn('(；′⌒`) 获取机器人 QQ 号失败:', e);
+            if (this._ctx === ctx) ctx.logger.warn('获取机器人 QQ 号失败:', e);
         }
     }
 
@@ -84,10 +142,15 @@ class PluginState {
         // 清理所有定时器
         for (const [jobId, timer] of this.timers) {
             clearInterval(timer);
-            this.logger.debug(`(｡-ω-) 清理定时器: ${jobId}`);
+            if (this.config.debug) this.logger.debug(`清理定时器: ${jobId}`);
         }
         this.timers.clear();
-        this._ctx = null;
+        try {
+            this.saveConfig();
+        } finally {
+            this._ctx = null;
+            this.selfId = '';
+        }
     }
 
     // ==================== 数据目录 ====================
@@ -133,10 +196,97 @@ class PluginState {
     saveDataFile<T>(filename: string, data: T): void {
         const filePath = this.getDataFilePath(filename);
         try {
-            fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+            writeJson(filePath, data);
         } catch (e) {
             this.logger.error('(╥﹏╥) 保存数据文件 ' + filename + ' 失败:', e);
+            throw e;
         }
+    }
+
+    // ==================== 配置管理 ====================
+
+    /**
+     * 从磁盘加载配置
+     */
+    loadConfig(): void {
+        const configPath = this.ctx.configPath;
+        try {
+            if (configPath && fs.existsSync(configPath)) {
+                const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+                this.config = sanitizeConfig(raw);
+                // 加载统计信息
+                if (isObject(raw) && isObject(raw.stats)) {
+                    Object.assign(this.stats, raw.stats);
+                }
+                if (this.config.debug) this.ctx.logger.debug('已加载本地配置');
+            } else {
+                this.config = { ...DEFAULT_CONFIG, groupConfigs: {} };
+                this.saveConfig();
+            }
+        } catch (error) {
+            this.ctx.logger.error('加载配置失败，使用默认配置:', error);
+            this.config = { ...DEFAULT_CONFIG, groupConfigs: {} };
+        }
+    }
+
+    /**
+     * 保存配置到磁盘
+     */
+    saveConfig(): void {
+        if (!this._ctx) return;
+        const configPath = this._ctx.configPath;
+        try {
+            const configDir = path.dirname(configPath);
+            if (!fs.existsSync(configDir)) {
+                fs.mkdirSync(configDir, { recursive: true });
+            }
+            const data = { ...this.config, stats: this.stats };
+            writeJson(configPath, data);
+        } catch (error) {
+            this._ctx.logger.error('保存配置失败:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * 合并更新配置
+     */
+    updateConfig(partial: Partial<PluginConfig>): void {
+        this.replaceConfig({ ...this.config, ...partial });
+    }
+
+    /**
+     * 完整替换配置
+     */
+    replaceConfig(config: PluginConfig): void {
+        const previous = this.config;
+        this.config = sanitizeConfig(config);
+        try {
+            this.saveConfig();
+        } catch (error) {
+            this.config = previous;
+            throw error;
+        }
+    }
+
+    /**
+     * 更新指定群的配置
+     */
+    updateGroupConfig(groupId: string, config: Partial<GroupConfig>): void {
+        this.replaceConfig({
+            ...this.config,
+            groupConfigs: {
+                ...this.config.groupConfigs,
+                [groupId]: { ...this.config.groupConfigs[groupId], ...config },
+            },
+        });
+    }
+
+    /**
+     * 检查群是否启用（默认启用，除非明确设置为 false）
+     */
+    isGroupEnabled(groupId: string): boolean {
+        return this.config.groupConfigs[groupId]?.enabled !== false;
     }
 
     // ==================== 统计 ====================

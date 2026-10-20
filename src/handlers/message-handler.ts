@@ -12,12 +12,11 @@
 import type { OB11Message, OB11PostSendMsg } from 'napcat-types/napcat-onebot';
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { pluginState } from '../core/state';
-import {getLiveRoomStatusBatch} from "../services/bilibili-service";
-import {storage} from "../core/storage";
+import { getLiveRoomStatusBatch } from '../services/bilibili-service';
+import { storage } from '../core/storage';
 
 // ==================== 命令解析 ====================
 
-const COMMAND_PREFIX = '#blive';
 
 interface ParsedCommand {
     subCommand: string;
@@ -25,9 +24,11 @@ interface ParsedCommand {
 }
 
 function parseCommand(message: string): ParsedCommand | null {
-    if (!message.startsWith(COMMAND_PREFIX)) return null;
+    if (!message.startsWith(pluginState.config.commandPrefix)) return null;
+    const suffix = message.slice(pluginState.config.commandPrefix.length);
+    if (suffix && !/^\s/.test(suffix)) return null;
 
-    const parts = message.slice(COMMAND_PREFIX.length).trim().split(/\s+/);
+    const parts = message.slice(pluginState.config.commandPrefix.length).trim().split(/\s+/);
     const subCommand = parts[0]?.toLowerCase() || '';
     const args = parts.slice(1);
 
@@ -161,13 +162,40 @@ export async function sendForwardMsg(
 // ==================== 权限检查 ====================
 
 /**
- * 检查群聊中是否有管理员权限
- * 私聊消息默认返回 true
+ * 检查是否有管理员权限
+ * - 群聊中：群主、管理员或配置的 superusers 之一
+ * - 私聊消息：默认返回 true（同时会检查 superusers）
  */
 export function isAdmin(event: OB11Message): boolean {
-    if (event.message_type !== 'group') return true;
+    const userId = String(event.user_id ?? '');
     const role = (event.sender as Record<string, unknown>)?.role;
-    return role === 'admin' || role === 'owner';
+
+    // 检查是否是群管理员/群主
+    if (event.message_type === 'group' && (role === 'admin' || role === 'owner')) {
+        return true;
+    }
+
+    // 检查当前用户是否在配置的超级管理员（superusers）列表中
+    // superusers 配置在插件 config.json 中，支持逗号或中文逗号分隔
+    try {
+        const superusersRaw = pluginState.config?.superusers ?? '';
+
+        const superusers = String(superusersRaw)
+            .split(/[,，]/)
+            .map(s => s.trim())
+            .filter(Boolean);
+            
+        // 如果 userId 存在且在超级管理员列表中，则拥有权限
+        if (userId && superusers.includes(userId)) {
+            return true;
+        }
+    } catch {
+        // 捕获可能的异常（如配置对象未初始化等），此时忽略超级管理员检查
+        // 防止因配置问题导致权限判断崩溃
+    }
+
+    // 私聊默认放行（兼容原有逻辑），群聊则拒绝
+    return event.message_type !== 'group';
 }
 
 // ==================== 消息处理主函数 ====================
@@ -178,37 +206,34 @@ export function isAdmin(event: OB11Message): boolean {
  */
 export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message): Promise<void> {
     try {
+        if (!pluginState.config.enabled) return;
+        if (event.message_type === 'group' && !pluginState.isGroupEnabled(String(event.group_id))) return;
         const rawMessage = event.raw_message || '';
-        const messageType = event.message_type;
-        const groupId = event.group_id;
-        const userId = event.user_id;
-
-        pluginState.ctx.logger.debug(`收到消息: ${rawMessage} | 类型: ${messageType}`);
 
         const parsed = parseCommand(rawMessage);
         if (!parsed) return;
+        if (pluginState.config.debug) ctx.logger.debug(`处理命令: ${parsed.subCommand}`);
 
         const { subCommand, args } = parsed;
 
-        // TODO: 在这里实现你的命令处理逻辑
         switch (subCommand) {
             case 'help': {
                 const helpText = [
                     `[= B站直播订阅插件帮助 =]`,
-                    `${COMMAND_PREFIX} help - 显示帮助信息`,
+                    `${pluginState.config.commandPrefix} help - 显示帮助信息`,
                     ``,
                     `【订阅管理】`,
-                    `${COMMAND_PREFIX} 订阅 <UID> - 订阅主播(群/私聊)`,
-                    `${COMMAND_PREFIX} 删除 <UID> - 取消订阅主播`,
-                    `${COMMAND_PREFIX} 列表 - 查看订阅列表`,
+                    `${pluginState.config.commandPrefix} 订阅 <UID> - 订阅主播(群/私聊)`,
+                    `${pluginState.config.commandPrefix} 删除 <UID> - 取消订阅主播`,
+                    `${pluginState.config.commandPrefix} 列表 - 查看订阅列表`,
                     ``,
                     `【群管理】`,
-                    `${COMMAND_PREFIX} atall on/off - 开启/关闭@全体`,
+                    `${pluginState.config.commandPrefix} atall on/off - 开启/关闭@全体`,
                     ``,
                     `【示例】`,
-                    `${COMMAND_PREFIX} 订阅 UID:407800065`,
-                    `${COMMAND_PREFIX} 订阅 407800065`,
-                    `${COMMAND_PREFIX} 删除 UID:407800065`,
+                    `${pluginState.config.commandPrefix} 订阅 UID:407800065`,
+                    `${pluginState.config.commandPrefix} 订阅 407800065`,
+                    `${pluginState.config.commandPrefix} 删除 UID:407800065`,
                 ].join('\n');
                 await sendReply(ctx, event, helpText);
                 break;
@@ -249,6 +274,7 @@ export async function handleMessage(ctx: NapCatPluginContext, event: OB11Message
             }
         }
     } catch (error) {
+        await sendReply(ctx, event, '操作失败，请稍后重试或联系管理员查看日志');
         pluginState.logger.error('处理消息时出错:', error);
     }
 }
@@ -266,7 +292,7 @@ function parseUidArg(arg: string): number | null {
     const uidPrefixMatch = arg.match(/^UID:(\d+)$/i);
     if (uidPrefixMatch) {
         const uid = parseInt(uidPrefixMatch[1], 10);
-        if (!isNaN(uid) && uid > 0) {
+        if (Number.isSafeInteger(uid) && uid > 0) {
             return uid;
         }
     }
@@ -275,7 +301,7 @@ function parseUidArg(arg: string): number | null {
     const numberMatch = arg.match(/^\d+$/);
     if (numberMatch) {
         const uid = parseInt(arg, 10);
-        if (!isNaN(uid) && uid > 0) {
+        if (Number.isSafeInteger(uid) && uid > 0) {
             return uid;
         }
     }
@@ -296,8 +322,12 @@ async function handleSubscribe(
     event: OB11Message,
     args: string[],
 ): Promise<void> {
+    if (event.message_type === 'group' && !isAdmin(event)) {
+        await sendReply(ctx, event, '只有群主或管理员才能订阅主播');
+        return;
+    }
     if (args.length === 0) {
-        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} 订阅 UID:<数字>\n例如: ${COMMAND_PREFIX} 订阅 UID:407800065`);
+        await sendReply(ctx, event, `用法: ${pluginState.config.commandPrefix} 订阅 UID:<数字>\n例如: ${pluginState.config.commandPrefix} 订阅 UID:407800065`);
         return;
     }
 
@@ -314,11 +344,11 @@ async function handleSubscribe(
     // 如果不在，尝试从B站获取信息
     if (!streamer) {
         const liveRoomData = await getLiveRoomStatusBatch([uid]);
-        if (liveRoomData.size === 0) {
+        const roomStatus = liveRoomData.get(uid);
+        if (!roomStatus) {
             await sendReply(ctx, event, `未找到UID为 ${uid} 的主播信息`);
             return;
         }
-        const roomStatus = Array.from(liveRoomData.values())[0];
         streamer = {
             uid: roomStatus.uid,
             roomId: roomStatus.roomId,
@@ -337,11 +367,6 @@ async function handleSubscribe(
         // 群订阅
         const groupId = String(event.group_id);
 
-        // 检查权限：只有管理员可以订阅
-        if (!isAdmin(event)) {
-            await sendReply(ctx, event, '只有群主或管理员才能订阅主播');
-            return;
-        }
 
         const success = storage.subscribeGroup(groupId, uid);
         if (success) {
@@ -370,8 +395,12 @@ async function handleUnsubscribe(
     event: OB11Message,
     args: string[],
 ): Promise<void> {
+    if (event.message_type === 'group' && !isAdmin(event)) {
+        await sendReply(ctx, event, '只有群主或管理员才能取消订阅');
+        return;
+    }
     if (args.length === 0) {
-        await sendReply(ctx, event, `用法: ${COMMAND_PREFIX} 删除 UID:<数字>\n例如: ${COMMAND_PREFIX} 删除 UID:407800065`);
+        await sendReply(ctx, event, `用法: ${pluginState.config.commandPrefix} 删除 UID:<数字>\n例如: ${pluginState.config.commandPrefix} 删除 UID:407800065`);
         return;
     }
 
@@ -394,11 +423,6 @@ async function handleUnsubscribe(
         // 群取消订阅
         const groupId = String(event.group_id);
 
-        // 检查权限
-        if (!isAdmin(event)) {
-            await sendReply(ctx, event, '只有群主或管理员才能取消订阅');
-            return;
-        }
 
         const success = storage.unsubscribeGroup(groupId, uid);
         if (success) {
@@ -435,7 +459,7 @@ async function handleList(
         const groupSub = storage.getGroupSub(groupId);
 
         if (streamers.length === 0) {
-            await sendReply(ctx, event, '本群还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅\n例如: ' + COMMAND_PREFIX + ' 订阅 407800065');
+            await sendReply(ctx, event, '本群还没有订阅任何主播\n使用 ' + pluginState.config.commandPrefix + ' 订阅 <UID> 来订阅\n例如: ' + pluginState.config.commandPrefix + ' 订阅 407800065');
             return;
         }
 
@@ -472,7 +496,7 @@ async function handleList(
         const streamers = storage.getUserSubscribedStreamers(userId);
 
         if (streamers.length === 0) {
-            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + COMMAND_PREFIX + ' 订阅 <UID> 来订阅\n例如: ' + COMMAND_PREFIX + ' 订阅 407800065');
+            await sendReply(ctx, event, '您还没有订阅任何主播\n使用 ' + pluginState.config.commandPrefix + ' 订阅 <UID> 来订阅\n例如: ' + pluginState.config.commandPrefix + ' 订阅 407800065');
             return;
         }
 
@@ -529,6 +553,6 @@ async function handleAtAll(
         await sendReply(ctx, event, '已关闭开播@全体功能');
     } else {
         const current = storage.getGroupAtAll(groupId);
-        await sendReply(ctx, event, `当前@全体状态: ${current ? '开启' : '关闭'}\n用法: ${COMMAND_PREFIX} atall on/off`);
+        await sendReply(ctx, event, `当前@全体状态: ${current ? '开启' : '关闭'}\n用法: ${pluginState.config.commandPrefix} atall on/off`);
     }
 }

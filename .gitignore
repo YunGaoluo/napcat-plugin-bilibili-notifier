@@ -1,12 +1,13 @@
 # Dependencies
 node_modules/
+.napcat-types/
+.pnpm-patches/
 
 # Build output
 dist/
 
 # IDE
-.vscode/*
-!.vscode/mcp.json
+.vscode/
 .idea/
 .examole/
 !.example/plugin
@@ -28,8 +29,8 @@ lerna-debug.log*
 
 # Environment
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # TypeScript
 *.tsbuildinfo

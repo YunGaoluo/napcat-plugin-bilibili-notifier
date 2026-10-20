@@ -104,7 +104,7 @@ class SubscriptionStorage {
         this.loadGroupSubs();
         this.loadUserSubs();
         this.rebuildIndex();
-        pluginState.logger.debug('✓ 订阅数据加载完成');
+        if (pluginState.config.debug) pluginState.logger.debug('订阅数据加载完成');
     }
 
     /** 加载主播数据 */
@@ -246,17 +246,25 @@ class SubscriptionStorage {
      * 添加或更新主播信息
      */
     setStreamer(streamer: Streamer): void {
+        const previous = this.streamers.get(streamer.uid);
         this.streamers.set(streamer.uid, {
             ...streamer,
             lastUpdateTime: Date.now(),
         });
-        this.saveStreamers();
+        try {
+            this.saveStreamers();
+        } catch (error) {
+            if (previous) this.streamers.set(streamer.uid, previous);
+            else this.streamers.delete(streamer.uid);
+            throw error;
+        }
     }
 
     /**
      * 批量添加或更新主播
      */
     setStreamers(streamers: Streamer[]): void {
+        const previous = streamers.map(streamer => [streamer.uid, this.streamers.get(streamer.uid)] as const);
         const now = Date.now();
         for (const streamer of streamers) {
             this.streamers.set(streamer.uid, {
@@ -264,7 +272,15 @@ class SubscriptionStorage {
                 lastUpdateTime: now,
             });
         }
-        this.saveStreamers();
+        try {
+            this.saveStreamers();
+        } catch (error) {
+            for (const [uid, value] of previous) {
+                if (value) this.streamers.set(uid, value);
+                else this.streamers.delete(uid);
+            }
+            throw error;
+        }
     }
 
     /**
@@ -388,7 +404,13 @@ class SubscriptionStorage {
 
         sub.streamerUids.push(uid);
         this.updateStreamerIndex(uid);
-        this.saveGroupSubs();
+        try {
+            this.saveGroupSubs();
+        } catch (error) {
+            sub.streamerUids.pop();
+            this.updateStreamerIndex(uid);
+            throw error;
+        }
         return true;
     }
 
@@ -405,7 +427,13 @@ class SubscriptionStorage {
 
         sub.streamerUids.splice(idx, 1);
         this.updateStreamerIndex(uid);
-        this.saveGroupSubs();
+        try {
+            this.saveGroupSubs();
+        } catch (error) {
+            sub.streamerUids.splice(idx, 0, uid);
+            this.updateStreamerIndex(uid);
+            throw error;
+        }
         return true;
     }
 
@@ -426,8 +454,12 @@ class SubscriptionStorage {
      */
     setGroupAtAll(groupId: string, enable: boolean): void {
         const sub = this.getOrCreateGroupSub(groupId);
+        const previous = sub.enableAtAll;
         sub.enableAtAll = enable;
-        this.saveGroupSubs();
+        try { this.saveGroupSubs(); } catch (error) {
+            sub.enableAtAll = previous;
+            throw error;
+        }
     }
 
     /**
@@ -442,8 +474,12 @@ class SubscriptionStorage {
      */
     setGroupEnabled(groupId: string, enabled: boolean): void {
         const sub = this.getOrCreateGroupSub(groupId);
+        const previous = sub.enabled;
         sub.enabled = enabled;
-        this.saveGroupSubs();
+        try { this.saveGroupSubs(); } catch (error) {
+            sub.enabled = previous;
+            throw error;
+        }
     }
 
     /**
@@ -502,7 +538,13 @@ class SubscriptionStorage {
 
         sub.streamerUids.push(uid);
         this.updateStreamerIndex(uid);
-        this.saveUserSubs();
+        try {
+            this.saveUserSubs();
+        } catch (error) {
+            sub.streamerUids.pop();
+            this.updateStreamerIndex(uid);
+            throw error;
+        }
         return true;
     }
 
@@ -518,7 +560,13 @@ class SubscriptionStorage {
 
         sub.streamerUids.splice(idx, 1);
         this.updateStreamerIndex(uid);
-        this.saveUserSubs();
+        try {
+            this.saveUserSubs();
+        } catch (error) {
+            sub.streamerUids.splice(idx, 0, uid);
+            this.updateStreamerIndex(uid);
+            throw error;
+        }
         return true;
     }
 
@@ -567,7 +615,9 @@ class SubscriptionStorage {
      * 获取订阅了该主播且启用了推送的群（用于开播推送）
      */
     getStreamerEnabledGroups(uid: number): GroupSubscription[] {
-        return this.getStreamerSubscribedGroups(uid).filter(sub => sub.enabled);
+        if (!pluginState.config.enabled) return [];
+        return this.getStreamerSubscribedGroups(uid)
+            .filter(sub => sub.enabled && pluginState.isGroupEnabled(sub.groupId));
     }
 
     /**

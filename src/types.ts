@@ -9,6 +9,27 @@
 
 // ==================== API 响应 ====================
 
+export interface PluginConfig {
+    /** 全局开关：是否启用插件功能 */
+    enabled: boolean;
+    /** 调试模式：启用后输出详细日志 */
+    debug: boolean;
+    /** 触发命令前缀，默认为 #blive */
+    commandPrefix: string;
+    /** 按群的单独配置 */
+    groupConfigs: Record<string, GroupConfig>;
+    superusers: string;
+}
+
+/**
+ * 群配置
+ */
+export interface GroupConfig {
+    /** 是否启用此群的功能 */
+    enabled?: boolean;
+}
+
+
 /**
  * 统一 API 响应格式
  */

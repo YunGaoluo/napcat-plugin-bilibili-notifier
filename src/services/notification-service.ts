@@ -4,59 +4,107 @@
  */
 
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
-// @ts-ignore
-import type { OB11PostSendMsg } from 'napcat-types/napcat-onebot/types/event';
+import type { OB11PostSendMsg } from 'napcat-types/napcat-onebot';
+import { OB11MessageDataType } from 'napcat-types/napcat-onebot/types/message';
 import { storage } from '../core/storage';
+import { pluginState } from '../core/state';
 
 export interface NotificationMessage {
     text: string;
     image?: string;
 }
 
+interface PendingNotification {
+    uid: number;
+    message: NotificationMessage;
+    atAll: boolean;
+    targets: string[];
+}
+
 export class NotificationService {
     private ctx: NapCatPluginContext;
+    private pending: Map<string, PendingNotification>;
+    private flushing: Promise<void> | null = null;
 
     constructor(ctx: NapCatPluginContext) {
         this.ctx = ctx;
+        this.pending = new Map(Object.entries(
+            pluginState.loadDataFile<Record<string, PendingNotification>>('notification_queue.json', {})
+        ));
     }
 
-    /**
-     * 发送通知给订阅了主播的所有群和用户
-     * @param uid 主播UID
-     * @param message 消息内容
-     * @param atAll 是否@全体，不传则使用群设置
-     */
-    async sendToSubscribers(uid: number, message: NotificationMessage, atAll?: boolean): Promise<void> {
-        const groups = storage.getStreamerEnabledGroups(uid);
-        const users = storage.getStreamerSubscribedUsers(uid);
-
-        if (groups.length === 0 && users.length === 0) {
-            return;
+    /** 先持久化事件与目标，再推进监控缓存。重复事件不会覆盖已送达记录。 */
+    enqueue(id: string, uid: number, message: NotificationMessage, atAll: boolean): void {
+        if (this.pending.has(id) || !pluginState.config.enabled) return;
+        const targets = [
+            ...storage.getStreamerEnabledGroups(uid).map(group => `group:${group.groupId}`),
+            ...storage.getStreamerSubscribedUsers(uid).map(user => `private:${user.userId}`),
+        ];
+        if (targets.length === 0) return;
+        this.pending.set(id, { uid, message, atAll, targets });
+        try {
+            this.save();
+        } catch (error) {
+            this.pending.delete(id);
+            throw error;
         }
+    }
 
-        // 发送到群（每个群单独构建消息，根据enableAtAll决定是否@全体）
-        for (const group of groups) {
-            try {
-                // 如果传入了atAll参数则使用，否则使用群设置
-                const shouldAtAll = atAll !== undefined ? atAll : group.enableAtAll;
-                const messageSegments = this.buildMessageSegments(message, shouldAtAll);
-                await this.sendToGroup(group.groupId, messageSegments);
-                this.ctx.logger.debug(`通知已发送到群 ${group.groupId}`);
-            } catch (error) {
-                this.ctx.logger.error(`发送通知到群 ${group.groupId} 失败:`, error);
+    /** 两种监控共享一个发送任务，失败目标留到下一轮，成功目标立即落盘。 */
+    flush(signal?: AbortSignal): Promise<void> {
+        if (this.flushing) return this.flushing;
+        this.flushing = this.sendPending(signal).finally(() => { this.flushing = null; });
+        return this.flushing;
+    }
+
+    private async sendPending(signal?: AbortSignal): Promise<void> {
+        const blockedTargets = new Set<string>();
+        for (const [id, entry] of this.pending) {
+            for (const target of [...entry.targets]) {
+                if (signal?.aborted || !pluginState.config.enabled) return;
+                if (blockedTargets.has(target)) continue;
+                const separator = target.indexOf(':');
+                const kind = target.slice(0, separator);
+                const targetId = target.slice(separator + 1);
+                const group = kind === 'group' ? storage.getGroupSub(targetId) : undefined;
+                const subscribed = kind === 'group'
+                    ? group?.streamerUids.includes(entry.uid)
+                    : storage.getUserSub(targetId)?.streamerUids.includes(entry.uid);
+                if (!subscribed) {
+                    this.acknowledge(id, entry, target);
+                    continue;
+                }
+                if (group && (!group.enabled || !pluginState.isGroupEnabled(targetId))) continue;
+                const segments = this.buildMessageSegments(entry.message, !!group && entry.atAll && group.enableAtAll);
+                try {
+                    if (kind === 'group') await this.sendToGroup(targetId, segments);
+                    else await this.sendToUser(targetId, segments);
+                } catch (error) {
+                    blockedTargets.add(target);
+                    this.ctx.logger.error(`发送通知到 ${target} 失败，保留待重试:`, error);
+                    continue;
+                }
+                this.acknowledge(id, entry, target);
+                if (pluginState.config.debug) this.ctx.logger.debug(`通知已发送到 ${target}`);
             }
         }
+    }
 
-        // 发送到用户（用户私聊不需要@全体）
-        const userMessageSegments = this.buildMessageSegments(message, false);
-        for (const user of users) {
-            try {
-                await this.sendToUser(user.userId, userMessageSegments);
-                this.ctx.logger.debug(`通知已发送给用户 ${user.userId}`);
-            } catch (error) {
-                this.ctx.logger.error(`发送通知给用户 ${user.userId} 失败:`, error);
-            }
+    private acknowledge(id: string, entry: PendingNotification, target: string): void {
+        const previous = entry.targets;
+        entry.targets = previous.filter(value => value !== target);
+        if (entry.targets.length === 0) this.pending.delete(id);
+        try {
+            this.save();
+        } catch (error) {
+            entry.targets = previous;
+            this.pending.set(id, entry);
+            throw error;
         }
+    }
+
+    private save(): void {
+        pluginState.saveDataFile('notification_queue.json', Object.fromEntries(this.pending));
     }
 
     /**
@@ -69,19 +117,16 @@ export class NotificationService {
 
         // 如果开启@全体，添加@全体消息段
         if (atAll) {
-            segments.push({ type: 'at', data: { qq: 'all' } });
-            segments.push({ type: 'text', data: { text: '\n' } });
+            segments.push({ type: OB11MessageDataType.at, data: { qq: 'all' } });
+            segments.push({ type: OB11MessageDataType.text, data: { text: '\n' } });
         }
 
         // 添加文本消息
-        segments.push({ type: 'text', data: { text: message.text } });
+        segments.push({ type: OB11MessageDataType.text, data: { text: message.text } });
 
         // 添加图片（如果有）
         if (message.image) {
-            segments.push({
-                type: 'image',
-                data: { file: message.image, url: message.image },
-            });
+            segments.push({ type: OB11MessageDataType.image, data: { file: message.image, url: message.image } });
         }
 
         return segments;
@@ -112,14 +157,18 @@ export class NotificationService {
     }
 }
 
-// 单例实例
 let instance: NotificationService | null = null;
+let instanceContext: NapCatPluginContext | null = null;
 
 export function createNotificationService(ctx: NapCatPluginContext): NotificationService {
-    instance = new NotificationService(ctx);
+    if (!instance || instanceContext !== ctx) {
+        instance = new NotificationService(ctx);
+        instanceContext = ctx;
+    }
     return instance;
 }
 
-export function getNotificationService(): NotificationService | null {
-    return instance;
+export function clearNotificationService(): void {
+    instance = null;
+    instanceContext = null;
 }
