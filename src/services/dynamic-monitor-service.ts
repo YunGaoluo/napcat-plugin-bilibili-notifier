@@ -16,9 +16,14 @@ import { renderDynamicCard } from './card-renderer';
 
 /** 动态缓存 */
 interface DynamicCache {
-    /** 已处理的动态 ID，不依赖发布时间与本机时钟。 */
+    /** 已处理的动态 ID，用于同日多条动态去重。 */
     seenIds: string[];
+    /** 已知动态的最大发布时间，早于该时间的动态一律视为历史内容。 */
+    latestTs: number;
 }
+
+/** 单个主播保留的已见 ID 上限，避免缓存无限增长。 */
+const MAX_SEEN_IDS = 200;
 
 /** 动态类型显示映射 */
 const DYNAMIC_TYPE_NAMES: Record<DynamicType, string> = {
@@ -130,24 +135,32 @@ export class DynamicMonitorService {
         if (!streamer) return;
         const cache = this.dynamicCache.get(uid);
         const seen = cache ? new Set(cache.seenIds) : undefined;
-        const dynamics = await getUserDynamics(uid, seen, signal);
+        const latestTs = cache?.latestTs ?? 0;
+        const dynamics = await getUserDynamics(uid, seen, signal, seen ? latestTs : undefined);
         if (signal?.aborted || !pluginState.config.enabled) return;
         if (!seen) {
-            this.dynamicCache.set(uid, { seenIds: dynamics.map(dynamic => dynamic.id) });
+            // 首页即基线；空列表用当前时间兜底，避免之后把历史动态当成新动态
+            const baseline = dynamics.reduce((max, item) => Math.max(max, item.author.pub_ts), 0)
+                || Math.floor(Date.now() / 1000);
+            this.dynamicCache.set(uid, { seenIds: dynamics.map(dynamic => dynamic.id), latestTs: baseline });
             this.saveCache();
             if (pluginState.config.debug) this.ctx.logger.debug(`[动态] 初始化 ${streamer.uname} 的动态缓存`);
             return;
         }
         dynamics.sort((a, b) => a.author.pub_ts - b.author.pub_ts);
+        let newest = latestTs;
         for (const dynamic of dynamics) {
             if (seen.has(dynamic.id)) continue;
+            seen.add(dynamic.id);
+            // 早于已知边界的条目来自历史分页，只记录不推送
+            if (dynamic.author.pub_ts <= latestTs) continue;
+            newest = Math.max(newest, dynamic.author.pub_ts);
             if (!SKIP_DYNAMIC_TYPES.includes(dynamic.type)) {
                 await this.enqueueDynamicNotification(uid, dynamic);
                 this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
             }
-            seen.add(dynamic.id);
         }
-        this.dynamicCache.set(uid, { seenIds: [...seen] });
+        this.dynamicCache.set(uid, { seenIds: [...seen].slice(-MAX_SEEN_IDS), latestTs: newest });
         this.saveCache();
     }
 
@@ -232,9 +245,12 @@ export class DynamicMonitorService {
     private loadCache(): void {
         const cache = pluginState.loadDataFile<Record<string, DynamicCache>>('dynamic_cache.json', {});
         for (const [uid, data] of Object.entries(cache)) {
-            if (data && Array.isArray(data.seenIds) && data.seenIds.every(id => typeof id === 'string')) {
-                this.dynamicCache.set(Number(uid), data);
-            }
+            if (!data || !Array.isArray(data.seenIds) || !data.seenIds.every(id => typeof id === 'string')) continue;
+            this.dynamicCache.set(Number(uid), {
+                seenIds: data.seenIds,
+                // 旧版本没有时间边界，用当前时间兜底，避免升级后补发历史
+                latestTs: typeof data.latestTs === 'number' ? data.latestTs : Math.floor(Date.now() / 1000),
+            });
         }
     }
 

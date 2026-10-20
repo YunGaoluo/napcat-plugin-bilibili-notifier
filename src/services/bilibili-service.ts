@@ -118,9 +118,14 @@ export async function getLiveRoomStatusBatch(uids: number[], signal?: AbortSigna
 
 // ==================== 动态相关 API ====================
 
+/** 动态发布时间，用于判断是否早于已知边界。 */
+function publisherTs(item: DynamicItemRaw): number {
+    return getModule(item.modules, 'MODULE_TYPE_AUTHOR')?.module_author?.pub_ts ?? 0;
+}
+
 /** 首次只读首页建立基线；随后向后翻页，直到遇到整页已知动态或读完。 */
 export async function getUserDynamics(
-    uid: number, knownIds?: ReadonlySet<string>, signal?: AbortSignal,
+    uid: number, knownIds?: ReadonlySet<string>, signal?: AbortSignal, knownBeforeTs?: number,
 ): Promise<DynamicInfo[]> {
     const result: DynamicInfo[] = [];
     const offsets = new Set<string>();
@@ -151,7 +156,10 @@ export async function getUserDynamics(
             ids.add(item.id_str);
         }
         if (pluginState.config.debug) pluginState.logger.debug(`获取用户 ${uid} 动态: 本页 ${page.items.length} 条`);
-        if (!knownIds || !page.has_more || page.items.every(item => knownIds.has(item.id_str))) break;
+        const isKnown = (item: DynamicItemRaw) =>
+            (knownIds?.has(item.id_str) ?? false)
+            || (knownBeforeTs !== undefined && publisherTs(item) <= knownBeforeTs);
+        if (!knownIds || !page.has_more || page.items.every(isKnown)) break;
         if (!page.offset || offsets.has(page.offset)) throw new Error('动态接口分页游标未推进');
         offsets.add(page.offset);
         offset = page.offset;

@@ -286,7 +286,7 @@ test('stop waits for an already dispatched OneBot action before completing', asy
     assert.deepEqual(queue(), {});
 });
 
-test('dynamic IDs handle equal timestamps and delayed visibility without @all or duplicates', async () => {
+test('unseen items at or before the known boundary are recorded without pushing', async () => {
     seed();
     storage.setGroupAtAll('100', true);
     const monitor = new DynamicMonitorService(ctx);
@@ -296,10 +296,9 @@ test('dynamic IDs handle equal timestamps and delayed visibility without @all or
     assert.deepEqual(sent, []);
     pages[''] = { items: [dynamic('same-second', 100), dynamic('delayed', 50), dynamic('old', 100)] };
     await checkDynamic(monitor);
-    assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)[1]), ['delayed', 'same-second']);
-    assert.equal(delivered.some(params => params.message.some(segment => segment.type === 'at')), false);
+    assert.deepEqual(delivered, []);
     await checkDynamic(monitor);
-    assert.equal(delivered.length, 2);
+    assert.deepEqual(delivered, []);
 });
 
 test('dynamic backlog is paginated until an entirely known page, keeping oldest-first order', async () => {
@@ -319,6 +318,25 @@ test('dynamic backlog is paginated until an entirely known page, keeping oldest-
     assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)[1]), ['new-1', 'new-2', 'new-3']);
 });
 
+test('a new post does not drag older pagination pages into the push', async () => {
+    seed();
+    const monitor = new DynamicMonitorService(ctx);
+    monitors.push(monitor);
+    pages = {
+        '': { items: [dynamic('old-a', 100), dynamic('old-b', 90)], has_more: true, offset: 'p2' },
+        p2: { items: [dynamic('old-c', 80), dynamic('old-d', 70)], has_more: false },
+    };
+    await checkDynamic(monitor);
+    assert.deepEqual(sent, []);
+
+    pages = {
+        '': { items: [dynamic('fresh', 200), dynamic('old-a', 100), dynamic('old-b', 90)], has_more: true, offset: 'p2' },
+        p2: { items: [dynamic('old-c', 80), dynamic('old-d', 70)], has_more: false },
+    };
+    await checkDynamic(monitor);
+    assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)[1]), ['fresh']);
+});
+
 test('dynamic push renders one card image preceded by a short header', async () => {
     seed();
     pluginState.updateConfig({ renderDynamicCard: true, gotenbergUrl: 'http://gotenberg.test', cardWidth: 600 });
@@ -332,7 +350,7 @@ test('dynamic push renders one card image preceded by a short header', async () 
     const monitor = new DynamicMonitorService(ctx);
     monitors.push(monitor);
     await checkDynamic(monitor);
-    pages[''] = { items: [dynamic('card-1')] };
+    pages[''] = { items: [dynamic('card-1', Math.floor(Date.now() / 1000) + 1)] };
     await checkDynamic(monitor);
 
     assert.equal(delivered.length, 1);
@@ -352,7 +370,7 @@ test('card rendering failure falls back to the full text notification', async ()
     const monitor = new DynamicMonitorService(ctx);
     monitors.push(monitor);
     await checkDynamic(monitor);
-    pages[''] = { items: [dynamic('fallback-1')] };
+    pages[''] = { items: [dynamic('fallback-1', Math.floor(Date.now() / 1000) + 1)] };
     await checkDynamic(monitor);
 
     assert.equal(delivered.length, 1);
@@ -365,7 +383,7 @@ test('empty initial dynamic feed establishes a baseline and later posts are deli
     const monitor = new DynamicMonitorService(ctx);
     monitors.push(monitor);
     await checkDynamic(monitor);
-    pages[''] = { items: [dynamic('first')] };
+    pages[''] = { items: [dynamic('first', Math.floor(Date.now() / 1000) + 1)] };
     await checkDynamic(monitor);
     assert.match(text(delivered[0]), /content first/);
 });
@@ -379,7 +397,7 @@ test('dynamic API failures do not advance the baseline; live cards remain suppre
     fetchAction = async () => ({ ok: false, status: 503 });
     await assert.rejects(monitor.checkStreamerDynamic(uid), /HTTP 503/);
     fetchAction = undefined;
-    pages[''] = { items: [dynamic('new'), dynamic('live', 101, 'DYNAMIC_TYPE_LIVE_RCMD'), dynamic('old')] };
+    pages[''] = { items: [dynamic('new', 200), dynamic('live', 201, 'DYNAMIC_TYPE_LIVE_RCMD'), dynamic('old', 100)] };
     await checkDynamic(monitor);
     assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)[1]), ['new']);
 });
