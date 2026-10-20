@@ -49,6 +49,13 @@ function sanitizeConfig(raw: unknown): PluginConfig {
         out.commandPrefix = raw.commandPrefix.trim();
     }
     if (typeof raw.superusers === 'string') out.superusers = raw.superusers;
+    if (typeof raw.renderDynamicCard === 'boolean') out.renderDynamicCard = raw.renderDynamicCard;
+    if (typeof raw.gotenbergUrl === 'string' && /^https?:\/\//.test(raw.gotenbergUrl.trim())) {
+        out.gotenbergUrl = raw.gotenbergUrl.trim().replace(/\/+$/, '');
+    }
+    if (typeof raw.cardWidth === 'number' && Number.isFinite(raw.cardWidth)) {
+        out.cardWidth = Math.min(1000, Math.max(320, Math.round(raw.cardWidth)));
+    }
 
     // 群配置清洗
     if (isObject(raw.groupConfigs)) {

@@ -166,8 +166,19 @@ type ModuleItem =
     | { module_type: 'MODULE_TYPE_AUTHOR'; module_author: ModuleAuthor }
     | { module_type: 'MODULE_TYPE_DESC'; module_desc: ModuleDesc }
     | { module_type: 'MODULE_TYPE_DYNAMIC'; module_dynamic: ModuleDynamic }
-    | { module_type: 'MODULE_TYPE_STAT'; module_stat: unknown }
+    | { module_type: 'MODULE_TYPE_STAT'; module_stat: ModuleStat }
     | { module_type: string; [key: string]: unknown };
+
+interface CountValue {
+    count?: number | string;
+}
+
+interface ModuleStat {
+    like?: CountValue;
+    comment?: CountValue;
+    forward?: CountValue;
+    reply?: CountValue;
+}
 
 interface ModuleAuthor {
     user: {
@@ -186,6 +197,9 @@ interface ModuleDesc {
         text: string;
         orig_text?: string;
         jump_url?: string;
+        emoji?: {
+            icon_url?: string;
+        };
     }>;
 }
 
@@ -207,6 +221,34 @@ interface ModuleDynamic {
         desc: string;
         duration_text: string;
         jump_url: string;
+        stat?: {
+            play?: number | string;
+            danmaku?: number | string;
+        };
+    };
+    major?: {
+        type?: string;
+        archive?: {
+            aid: string;
+            bvid: string;
+            title: string;
+            cover: string;
+            desc: string;
+            duration_text: string;
+            jump_url: string;
+            stat?: {
+                play?: number | string;
+                danmaku?: number | string;
+            };
+        };
+        draw?: {
+            id?: number;
+            items: Array<{
+                src: string;
+                width: number;
+                height: number;
+            }>;
+        };
     };
     dyn_forward?: {
         item: DynamicItemRaw;
@@ -276,40 +318,48 @@ function parseDynamicItem(item: DynamicItemRaw): DynamicInfo | undefined {
     const dynamicModule = getModule(item.modules, 'MODULE_TYPE_DYNAMIC');
     if (dynamicModule?.module_dynamic) {
         const dynData = dynamicModule.module_dynamic;
+        const drawItems = dynData.dyn_draw?.items ?? dynData.major?.draw?.items;
+        const archive = dynData.dyn_archive ?? dynData.major?.archive;
 
-        switch (dynData.type) {
-            case 'MDL_DYN_TYPE_DRAW':
-                // 图文动态
-                if (dynData.dyn_draw) {
-                    dynamic.draw = {
-                        items: dynData.dyn_draw.items,
-                    };
-                }
-                break;
+        if (drawItems && drawItems.length > 0) {
+            dynamic.draw = { items: drawItems };
+        }
 
-            case 'MDL_DYN_TYPE_ARCHIVE':
-                // 视频投稿
-                if (dynData.dyn_archive) {
-                    dynamic.archive = {
-                        aid: dynData.dyn_archive.aid,
-                        bvid: dynData.dyn_archive.bvid,
-                        title: dynData.dyn_archive.title,
-                        cover: dynData.dyn_archive.cover,
-                        desc: dynData.dyn_archive.desc,
-                        duration_text: dynData.dyn_archive.duration_text,
-                        jump_url: dynData.dyn_archive.jump_url,
-                    };
-                }
-                break;
+        if (archive) {
+            dynamic.archive = {
+                aid: archive.aid,
+                bvid: archive.bvid,
+                title: archive.title,
+                cover: archive.cover,
+                desc: archive.desc,
+                duration_text: archive.duration_text,
+                jump_url: archive.jump_url,
+                play: toCount(archive.stat?.play),
+                danmaku: toCount(archive.stat?.danmaku),
+            };
+        }
 
-            case 'MDL_DYN_TYPE_FORWARD':
-                // 转发动态
-                if (dynData.dyn_forward?.item) {
-                    dynamic.orig = parseDynamicItem(dynData.dyn_forward.item);
-                }
-                break;
+        if (dynData.type === 'MDL_DYN_TYPE_FORWARD' && dynData.dyn_forward?.item) {
+            dynamic.orig = parseDynamicItem(dynData.dyn_forward.item);
         }
     }
 
+    // 提取互动数据
+    const statModule = getModule(item.modules, 'MODULE_TYPE_STAT');
+    if (statModule?.module_stat) {
+        const stat = statModule.module_stat;
+        dynamic.stats = {
+            like: toCount(stat.like?.count) ?? 0,
+            comment: toCount(stat.comment?.count) ?? toCount(stat.reply?.count) ?? 0,
+            forward: toCount(stat.forward?.count) ?? 0,
+        };
+    }
+
     return dynamic;
+}
+
+/** 接口计数字段可能为字符串，无法解析时返回 undefined。 */
+function toCount(value: number | string | undefined): number | undefined {
+    const parsed = Number(value ?? 0);
+    return Number.isFinite(parsed) ? parsed : undefined;
 }

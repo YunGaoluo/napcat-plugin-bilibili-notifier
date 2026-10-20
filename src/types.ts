@@ -19,6 +19,12 @@ export interface PluginConfig {
     /** 按群的单独配置 */
     groupConfigs: Record<string, GroupConfig>;
     superusers: string;
+    /** 是否将动态推送渲染为图片卡片 */
+    renderDynamicCard: boolean;
+    /** Gotenberg 服务地址 */
+    gotenbergUrl: string;
+    /** 渲染卡片宽度（像素） */
+    cardWidth: number;
 }
 
 /**
@@ -112,6 +118,17 @@ export interface DynamicArchive {
     desc: string;
     duration_text: string;
     jump_url: string;
+    /** 播放数 */
+    play?: number;
+    /** 弹幕数 */
+    danmaku?: number;
+}
+
+/** 动态互动数据 */
+export interface DynamicStats {
+    like: number;
+    comment: number;
+    forward: number;
 }
 
 /** 图文动态内容 */
@@ -131,6 +148,9 @@ export interface DynamicContent {
         text: string;
         orig_text?: string;
         jump_url?: string;
+        emoji?: {
+            icon_url?: string;
+        };
     }>;
 }
 
@@ -150,6 +170,8 @@ export interface DynamicInfo {
     draw?: DynamicDraw;
     /** 转发源动态（仅转发类型） */
     orig?: DynamicInfo;
+    /** 互动数据 */
+    stats?: DynamicStats;
     /** 动态链接 */
     jump_url?: string;
 }

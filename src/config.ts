@@ -12,7 +12,10 @@ export const DEFAULT_CONFIG: PluginConfig = {
     debug: false,
     commandPrefix: '#blive',
     groupConfigs: {},
-    superusers: ''
+    superusers: '',
+    renderDynamicCard: true,
+    gotenbergUrl: 'http://Gotenberg:3000',
+    cardWidth: 640,
 };
 
 /**
@@ -44,6 +47,10 @@ export function buildConfigSchema(ctx: NapCatPluginContext): PluginConfigSchema 
         // 命令前缀
         ctx.NapCatConfig.text('commandPrefix', '命令前缀', '#blive', '触发命令的前缀，默认为 #blive'),
         // 超级管理员
-        ctx.NapCatConfig.text('superusers', '主人QQ', '', '拥有最高权限的QQ号')
+        ctx.NapCatConfig.text('superusers', '主人QQ', '', '拥有最高权限的QQ号'),
+        // 动态卡片渲染
+        ctx.NapCatConfig.boolean('renderDynamicCard', '动态卡片渲染', true, '将动态推送渲染为 B 站风格图片，渲染失败时回退为文本'),
+        ctx.NapCatConfig.text('gotenbergUrl', 'Gotenberg 地址', 'http://Gotenberg:3000', '用于渲染卡片的 Gotenberg 服务地址'),
+        ctx.NapCatConfig.number('cardWidth', '卡片宽度', 640, '渲染图片宽度（像素），高度按内容自适应')
     );
 }

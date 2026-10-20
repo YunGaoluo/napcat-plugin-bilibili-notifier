@@ -127,9 +127,11 @@ export class NotificationService {
         // 添加文本消息
         segments.push({ type: OB11MessageDataType.text, data: { text: message.text } });
 
-        // 添加图片（如果有）
+        // 添加图片（如果有）；卡片以 base64 传入，远程图片才附带 url
         if (message.image) {
-            segments.push({ type: OB11MessageDataType.image, data: { file: message.image, url: message.image } });
+            segments.push(message.image.startsWith('base64://')
+                ? { type: OB11MessageDataType.image, data: { file: message.image } }
+                : { type: OB11MessageDataType.image, data: { file: message.image, url: message.image } });
         }
 
         return segments;

@@ -82,6 +82,7 @@ beforeEach(() => {
     };
     clearNotificationService();
     pluginState.init(ctx);
+    pluginState.updateConfig({ renderDynamicCard: false });
 });
 
 afterEach(async () => {
@@ -316,6 +317,47 @@ test('dynamic backlog is paginated until an entirely known page, keeping oldest-
     await checkDynamic(monitor);
     assert.deepEqual(requests.map(request => request.url.searchParams.get('offset') || ''), ['', 'p2', 'p3']);
     assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)[1]), ['new-1', 'new-2', 'new-3']);
+});
+
+test('dynamic push renders one card image preceded by a short header', async () => {
+    seed();
+    pluginState.updateConfig({ renderDynamicCard: true, gotenbergUrl: 'http://gotenberg.test', cardWidth: 600 });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    fetchAction = async url => {
+        if (url.hostname === 'gotenberg.test') {
+            return new Response(png, { status: 200, headers: { 'content-type': 'image/png' } });
+        }
+        return response(pages[url.searchParams.get('offset') || '']);
+    };
+    const monitor = new DynamicMonitorService(ctx);
+    monitors.push(monitor);
+    await checkDynamic(monitor);
+    pages[''] = { items: [dynamic('card-1')] };
+    await checkDynamic(monitor);
+
+    assert.equal(delivered.length, 1);
+    assert.equal(text(delivered[0]), 'Test UP 发布了新文字动态！');
+    assert.deepEqual(delivered[0].message.map(segment => segment.type), ['text', 'image']);
+    assert.match(delivered[0].message[1].data.file, /^base64:\/\//);
+    assert.equal(requests.filter(request => request.url.hostname === 'gotenberg.test').length, 1);
+});
+
+test('card rendering failure falls back to the full text notification', async () => {
+    seed();
+    pluginState.updateConfig({ renderDynamicCard: true, gotenbergUrl: 'http://gotenberg.test' });
+    fetchAction = async url => {
+        if (url.hostname === 'gotenberg.test') return new Response('boom', { status: 500 });
+        return response(pages[url.searchParams.get('offset') || '']);
+    };
+    const monitor = new DynamicMonitorService(ctx);
+    monitors.push(monitor);
+    await checkDynamic(monitor);
+    pages[''] = { items: [dynamic('fallback-1')] };
+    await checkDynamic(monitor);
+
+    assert.equal(delivered.length, 1);
+    assert.match(text(delivered[0]), /content fallback-1/);
+    assert.match(text(delivered[0]), /发布了新文字动态/);
 });
 
 test('empty initial dynamic feed establishes a baseline and later posts are delivered', async () => {

@@ -12,6 +12,7 @@ import { storage } from '../core/storage';
 import { getUserDynamics } from './bilibili-service';
 import { DynamicInfo, DynamicType } from '../types';
 import { createNotificationService, type NotificationService } from './notification-service';
+import { renderDynamicCard } from './card-renderer';
 
 /** 动态缓存 */
 interface DynamicCache {
@@ -141,7 +142,7 @@ export class DynamicMonitorService {
         for (const dynamic of dynamics) {
             if (seen.has(dynamic.id)) continue;
             if (!SKIP_DYNAMIC_TYPES.includes(dynamic.type)) {
-                this.enqueueDynamicNotification(uid, dynamic);
+                await this.enqueueDynamicNotification(uid, dynamic);
                 this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
             }
             seen.add(dynamic.id);
@@ -150,12 +151,22 @@ export class DynamicMonitorService {
         this.saveCache();
     }
 
-    /** 发送动态通知 */
-    private enqueueDynamicNotification(uid: number, dynamic: DynamicInfo): void {
+    /** 发送动态通知：优先卡片图片，渲染失败回退完整文本。 */
+    private async enqueueDynamicNotification(uid: number, dynamic: DynamicInfo): Promise<void> {
         const streamer = storage.getStreamer(uid);
         if (!streamer) return;
 
         const typeName = DYNAMIC_TYPE_NAMES[dynamic.type] || '动态';
+        const id = `dynamic:${uid}:${dynamic.id}`;
+        const card = await renderDynamicCard(dynamic, streamer.uname);
+        if (card) {
+            this.notificationService.enqueue(id, uid, {
+                text: `${streamer.uname} 发布了新${typeName}动态！`,
+                image: card,
+            }, false);
+            return;
+        }
+
         const message = this.buildDynamicMessage(streamer.uname, typeName, dynamic);
 
         // 获取第一张图片（如果有）
@@ -166,7 +177,7 @@ export class DynamicMonitorService {
             image = dynamic.draw.items[0].src;
         }
 
-        this.notificationService.enqueue(`dynamic:${uid}:${dynamic.id}`, uid, {
+        this.notificationService.enqueue(id, uid, {
             text: message,
             image,
         }, false);
