@@ -33,15 +33,18 @@ export class NotificationService {
         ));
     }
 
-    /** 先持久化事件与目标，再推进监控缓存。重复事件不会覆盖已送达记录。 */
-    enqueue(id: string, uid: number, message: NotificationMessage, atAll: boolean): void {
+    /**
+     * 先持久化事件与目标，再推进监控缓存。重复事件不会覆盖已送达记录。
+     * 传入 targets 时只投递给指定目标，用于订阅后的单目标补发。
+     */
+    enqueue(id: string, uid: number, message: NotificationMessage, atAll: boolean, targets?: string[]): void {
         if (this.pending.has(id) || !pluginState.config.enabled) return;
-        const targets = [
+        const resolved = targets ? [...targets] : [
             ...storage.getStreamerEnabledGroups(uid).map(group => `group:${group.groupId}`),
             ...storage.getStreamerSubscribedUsers(uid).map(user => `private:${user.userId}`),
         ];
-        if (targets.length === 0) return;
-        this.pending.set(id, { uid, message, atAll, targets });
+        if (resolved.length === 0) return;
+        this.pending.set(id, { uid, message, atAll, targets: resolved });
         try {
             this.save();
         } catch (error) {

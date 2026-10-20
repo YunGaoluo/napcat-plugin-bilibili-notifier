@@ -162,6 +162,42 @@ test('live failure is retried only for failed recipients, including after restar
     assert.deepEqual(queue(), {});
 });
 
+test('subscribing while already live sends one catch-up to the new group only', async () => {
+    seed(['100']);
+    const monitor = await pollLive();
+    assert.equal(delivered.filter(params => params.group_id === '100').length, 1);
+
+    await handleMessage(ctx, groupEvent('#blive 订阅 UID:42', 'admin', 101));
+    await createNotificationService(ctx).flush();
+
+    const catchUps = () => delivered.filter(params => params.group_id === '101' && /开播提醒/.test(text(params)));
+    assert.equal(catchUps().length, 1);
+    assert.match(text(catchUps()[0]), /Test UP 开播啦/);
+
+    await monitor.checkAllStreamers();
+    assert.equal(catchUps().length, 1);
+    assert.equal(delivered.filter(params => params.group_id === '100' && /开播提醒/.test(text(params))).length, 1);
+});
+
+test('live cache is dropped after the last unsubscribe and rebuilt on re-subscribe', async () => {
+    seed(['100']);
+    const monitor = await pollLive();
+    const cacheFile = () => pluginState.loadDataFile('live_cache.json', {});
+    assert.equal(cacheFile()[uid].lastLiveStatus, 1);
+
+    await handleMessage(ctx, groupEvent('#blive 删除 UID:42'));
+    await monitor.checkAllStreamers();
+    assert.equal(cacheFile()[uid], undefined);
+
+    await handleMessage(ctx, groupEvent('#blive 订阅 UID:42'));
+    await createNotificationService(ctx).flush();
+    const starts = () => delivered.filter(params => params.group_id === '100' && /开播提醒/.test(text(params)));
+    assert.equal(starts().length, 1);
+
+    await monitor.checkAllStreamers();
+    assert.equal(starts().length, 2);
+});
+
 test('a failing recipient does not receive later events before the earlier event succeeds', async () => {
     seed(['100', '101']);
     const notifier = createNotificationService(ctx);

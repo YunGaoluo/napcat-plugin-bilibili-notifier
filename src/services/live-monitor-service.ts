@@ -11,12 +11,32 @@ import { storage } from '../core/storage';
 import type { Streamer } from '../core/storage';
 import { getLiveRoomStatusBatch } from './bilibili-service';
 import type { LiveRoomStatus } from '../types';
-import { createNotificationService, type NotificationService } from './notification-service';
+import { createNotificationService, type NotificationMessage, type NotificationService } from './notification-service';
+
+const LIVE_CACHE_FILE = 'live_cache.json';
 
 /** 主播直播状态缓存 */
 interface StreamerLiveCache {
     lastLiveStatus: number;
     lastLiveTime: number;
+}
+
+/** 构建开播通知内容，供状态监控与订阅补发复用。 */
+export function buildLiveStartMessage(uname: string, status: LiveRoomStatus): NotificationMessage {
+    const text = [
+        '【开播提醒】',
+        `${uname} 开播啦！`,
+        `标题：${status.title}`,
+        `分区: ${status.parentAreaName} - ${status.areaName}`,
+        `https://live.bilibili.com/${status.roomId}`,
+    ].join('\n');
+    return { text, image: status.cover };
+}
+
+/** 该主播的开播事件是否已经发出；未发出时交给下一轮轮询统一补发，避免重复。 */
+export function hasNotifiedLive(uid: number): boolean {
+    const cache = pluginState.loadDataFile<Record<string, StreamerLiveCache>>(LIVE_CACHE_FILE, {});
+    return cache[String(uid)]?.lastLiveStatus === 1;
 }
 
 export class LiveMonitorService {
@@ -88,6 +108,7 @@ export class LiveMonitorService {
     private async runCheck(signal: AbortSignal): Promise<void> {
         await this.notificationService.flush(signal);
         if (signal.aborted || !pluginState.config.enabled) return;
+        this.pruneOrphanedCache();
         const subscribedStreamers = storage.getAllStreamers().filter(streamer =>
             storage.getStreamerEnabledGroups(streamer.uid).length > 0
             || storage.getStreamerSubscribedUsers(streamer.uid).length > 0
@@ -145,18 +166,12 @@ export class LiveMonitorService {
 
     /** 发送开播通知 */
     private enqueueLiveStartNotification(streamer: Streamer, status: LiveRoomStatus): void {
-        const message = [
-            `【开播提醒】`,
-            `${streamer.uname} 开播啦！`,
-            `标题：${status.title}`,
-            `分区: ${status.parentAreaName} - ${status.areaName}`,
-            `https://live.bilibili.com/${status.roomId}`,
-        ].join('\n');
-
-        this.notificationService.enqueue(`live:${streamer.uid}:start:${status.liveTime}`, streamer.uid, {
-            text: message,
-            image: streamer.cover,
-        }, true);
+        this.notificationService.enqueue(
+            `live:${streamer.uid}:start:${status.liveTime}`,
+            streamer.uid,
+            buildLiveStartMessage(streamer.uname, status),
+            true,
+        );
     }
 
     /** 发送下播通知 */
@@ -186,7 +201,7 @@ export class LiveMonitorService {
 
     /** 加载缓存 */
     private loadCache(): void {
-        const cache = pluginState.loadDataFile<Record<string, StreamerLiveCache>>('live_cache.json', {});
+        const cache = pluginState.loadDataFile<Record<string, StreamerLiveCache>>(LIVE_CACHE_FILE, {});
         for (const [uid, data] of Object.entries(cache)) {
             this.liveCache.set(Number(uid), data);
         }
@@ -198,7 +213,24 @@ export class LiveMonitorService {
         for (const [uid, cache] of this.liveCache) {
             data[uid] = cache;
         }
-        pluginState.saveDataFile('live_cache.json', data);
+        pluginState.saveDataFile(LIVE_CACHE_FILE, data);
+    }
+
+    /** 取消订阅后立即丢弃该主播的直播状态，避免重新订阅时沿用旧状态。 */
+    forgetStreamer(uid: number): void {
+        if (!this.liveCache.delete(uid)) return;
+        this.saveCache();
+    }
+
+    /** 清理已无任何订阅者的缓存条目，覆盖重启前遗留或遗漏的取消路径。 */
+    private pruneOrphanedCache(): void {
+        let removed = false;
+        for (const uid of [...this.liveCache.keys()]) {
+            if (storage.hasAnySubscribers(uid)) continue;
+            this.liveCache.delete(uid);
+            removed = true;
+        }
+        if (removed) this.saveCache();
     }
 
     getStatus(): boolean {

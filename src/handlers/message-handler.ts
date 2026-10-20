@@ -13,6 +13,8 @@ import type { OB11Message, OB11PostSendMsg } from 'napcat-types/napcat-onebot';
 import type { NapCatPluginContext } from 'napcat-types/napcat-onebot/network/plugin/types';
 import { pluginState } from '../core/state';
 import { getLiveRoomStatusBatch } from '../services/bilibili-service';
+import { buildLiveStartMessage, getLiveMonitor, hasNotifiedLive } from '../services/live-monitor-service';
+import { createNotificationService } from '../services/notification-service';
 import { storage } from '../core/storage';
 
 // ==================== 命令解析 ====================
@@ -313,6 +315,30 @@ function parseUidArg(arg: string): number | null {
 // ==================== 业务逻辑 ====================
 
 /**
+ * 向新订阅目标补发一次开播通知。
+ *
+ * 仅当该主播的开播事件已经发过时才补发；若尚未发出，下一轮轮询会统一推送给
+ * 所有订阅者（包含新目标），此处直接返回以避免重复。
+ */
+async function sendLiveCatchUp(ctx: NapCatPluginContext, uid: number, target: string): Promise<void> {
+    if (!hasNotifiedLive(uid)) return;
+    try {
+        const status = (await getLiveRoomStatusBatch([uid])).get(uid);
+        if (!status || status.liveStatus !== 1) return;
+        const groupId = target.startsWith('group:') ? target.slice('group:'.length) : null;
+        createNotificationService(ctx).enqueue(
+            `live:${uid}:start:${status.liveTime}:catchup:${target}`,
+            uid,
+            buildLiveStartMessage(status.uname, status),
+            groupId !== null && storage.getGroupAtAll(groupId),
+            [target],
+        );
+    } catch (error) {
+        ctx.logger.warn(`补发开播通知失败 (UID: ${uid}):`, error);
+    }
+}
+
+/**
  * 处理订阅命令
  * 支持群订阅和用户私聊订阅
  * 格式: #blive 订阅 UID:407800065
@@ -371,6 +397,7 @@ async function handleSubscribe(
         const success = storage.subscribeGroup(groupId, uid);
         if (success) {
             await sendReply(ctx, event, `群订阅成功\n主播: ${streamer.uname}\nUID: ${uid}\n直播间: https://live.bilibili.com/${streamer.roomId}`);
+            await sendLiveCatchUp(ctx, uid, `group:${groupId}`);
         } else {
             await sendReply(ctx, event, `本群已经订阅了 ${streamer.uname}`);
         }
@@ -380,6 +407,7 @@ async function handleSubscribe(
         const success = storage.subscribeUser(userId, uid);
         if (success) {
             await sendReply(ctx, event, `订阅成功\n主播: ${streamer.uname}\nUID: ${uid}\n直播间: https://live.bilibili.com/${streamer.roomId}`);
+            await sendLiveCatchUp(ctx, uid, `private:${userId}`);
         } else {
             await sendReply(ctx, event, `您已经订阅了 ${streamer.uname}`);
         }
@@ -427,6 +455,7 @@ async function handleUnsubscribe(
         const success = storage.unsubscribeGroup(groupId, uid);
         if (success) {
             await sendReply(ctx, event, `已取消订阅\n主播: ${streamer.uname}\nUID: ${uid}`);
+            if (!storage.hasAnySubscribers(uid)) getLiveMonitor()?.forgetStreamer(uid);
         } else {
             await sendReply(ctx, event, `本群没有订阅 ${streamer.uname}`);
         }
@@ -436,6 +465,7 @@ async function handleUnsubscribe(
         const success = storage.unsubscribeUser(userId, uid);
         if (success) {
             await sendReply(ctx, event, `已取消订阅\n主播: ${streamer.uname}\nUID: ${uid}`);
+            if (!storage.hasAnySubscribers(uid)) getLiveMonitor()?.forgetStreamer(uid);
         } else {
             await sendReply(ctx, event, `您没有订阅 ${streamer.uname}`);
         }
