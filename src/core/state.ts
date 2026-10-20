@@ -88,7 +88,10 @@ class PluginState {
     selfId: string = '';
 
     /** 活跃的定时器 Map: jobId -> NodeJS.Timeout */
-    timers: Map<string, ReturnType<typeof setInterval>> = new Map();
+    timers: Map<string, NodeJS.Timeout> = new Map();
+
+    /** 命令冷却记录：key -> 上次执行时间（运行时状态，重载后重置） */
+    commandCooldowns = new Map<string, number>();
 
     /** 运行时统计 */
     stats = {
@@ -116,6 +119,7 @@ class PluginState {
     init(ctx: NapCatPluginContext): void {
         this._ctx = ctx;
         this.startTime = Date.now();
+        this.commandCooldowns.clear();
         this.loadConfig();
         this.ensureDataDir();
 
@@ -152,6 +156,7 @@ class PluginState {
             if (this.config.debug) this.logger.debug(`清理定时器: ${jobId}`);
         }
         this.timers.clear();
+        this.commandCooldowns.clear();
         try {
             this.saveConfig();
         } finally {

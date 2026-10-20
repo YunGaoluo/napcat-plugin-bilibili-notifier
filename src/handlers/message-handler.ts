@@ -16,6 +16,16 @@ import { getLiveRoomStatusBatch } from '../services/bilibili-service';
 import { buildLiveStartMessage, getLiveMonitor, hasNotifiedLive } from '../services/live-monitor-service';
 import { createNotificationService } from '../services/notification-service';
 import { storage } from '../core/storage';
+import type { Streamer } from '../core/storage';
+
+/** 单个群或用户可订阅的主播数量上限。 */
+const MAX_SUBSCRIPTIONS_PER_TARGET = 50;
+/** 全局跟踪的主播数量上限，限制恶意刷订阅造成的轮询压力。 */
+const MAX_TRACKED_STREAMERS = 500;
+/** 同一用户在同一会话中执行订阅/取消订阅的最小间隔。 */
+const COMMAND_COOLDOWN_MS = 3000;
+/** 列表消息的分段长度上限，避免超过 QQ 单条消息长度。 */
+const LIST_CHUNK_LIMIT = 3000;
 
 // ==================== 命令解析 ====================
 
@@ -321,13 +331,21 @@ function parseUidArg(arg: string): number | null {
  * 所有订阅者（包含新目标），此处直接返回以避免重复。
  */
 async function sendLiveCatchUp(ctx: NapCatPluginContext, uid: number, target: string): Promise<void> {
-    if (!hasNotifiedLive(uid)) return;
+    const streamer = storage.getStreamer(uid);
+    if (!streamer || streamer.liveStatus !== 1) return;
     try {
         const status = (await getLiveRoomStatusBatch([uid])).get(uid);
         if (!status || status.liveStatus !== 1) return;
+        const service = createNotificationService(ctx);
+        const eventId = `live:${uid}:start:${status.liveTime}`;
+        if (!hasNotifiedLive(uid)) {
+            // 开播事件可能刚入队但尚未落盘：直接补上新目标；否则交给下一轮轮询统一推送
+            service.addTarget(eventId, target);
+            return;
+        }
         const groupId = target.startsWith('group:') ? target.slice('group:'.length) : null;
-        createNotificationService(ctx).enqueue(
-            `live:${uid}:start:${status.liveTime}:catchup:${target}`,
+        service.enqueue(
+            `${eventId}:catchup:${target}`,
             uid,
             buildLiveStartMessage(status.uname, status),
             groupId !== null && storage.getGroupAtAll(groupId),
@@ -364,8 +382,26 @@ async function handleSubscribe(
         return;
     }
 
+    // 频率限制：同一用户在同一会话中的订阅操作至少间隔 3 秒
+    const cooldownKey = event.message_type === 'group'
+        ? `group:${event.group_id}:${event.user_id}`
+        : `private:${event.user_id}`;
+    const now = Date.now();
+    if (now - (pluginState.commandCooldowns.get(cooldownKey) ?? 0) < COMMAND_COOLDOWN_MS) {
+        await sendReply(ctx, event, '操作过于频繁，请稍后再试');
+        return;
+    }
+    pluginState.commandCooldowns.set(cooldownKey, now);
+
     // 检查主播是否已在数据库中
     let streamer = storage.getStreamer(uid);
+
+    const trackedCount = storage.getAllStreamers()
+        .filter(item => storage.hasAnySubscribers(item.uid)).length;
+    if (!streamer && trackedCount >= MAX_TRACKED_STREAMERS) {
+        await sendReply(ctx, event, `监控主播数量已达上限（${MAX_TRACKED_STREAMERS}），无法继续订阅`);
+        return;
+    }
 
     // 如果不在，尝试从B站获取信息
     if (!streamer) {
@@ -392,7 +428,12 @@ async function handleSubscribe(
     if (event.message_type === 'group' && event.group_id) {
         // 群订阅
         const groupId = String(event.group_id);
-
+        const existing = storage.getGroupSub(groupId);
+        if (!existing?.streamerUids.includes(uid)
+            && (existing?.streamerUids.length ?? 0) >= MAX_SUBSCRIPTIONS_PER_TARGET) {
+            await sendReply(ctx, event, `本群订阅数量已达上限（${MAX_SUBSCRIPTIONS_PER_TARGET}），请先删除部分订阅`);
+            return;
+        }
 
         const success = storage.subscribeGroup(groupId, uid);
         if (success) {
@@ -404,6 +445,13 @@ async function handleSubscribe(
     } else if (event.message_type === 'private' && event.user_id) {
         // 用户私聊订阅
         const userId = String(event.user_id);
+        const existing = storage.getUserSub(userId);
+        if (!existing?.streamerUids.includes(uid)
+            && (existing?.streamerUids.length ?? 0) >= MAX_SUBSCRIPTIONS_PER_TARGET) {
+            await sendReply(ctx, event, `订阅数量已达上限（${MAX_SUBSCRIPTIONS_PER_TARGET}），请先删除部分订阅`);
+            return;
+        }
+
         const success = storage.subscribeUser(userId, uid);
         if (success) {
             await sendReply(ctx, event, `订阅成功\n主播: ${streamer.uname}\nUID: ${uid}\n直播间: https://live.bilibili.com/${streamer.roomId}`);
@@ -472,18 +520,50 @@ async function handleUnsubscribe(
     }
 }
 
+/** 按消息长度切分订阅列表，避免单条消息超过平台限制后被静默丢弃。 */
+async function sendStreamerList(
+    ctx: NapCatPluginContext,
+    event: OB11Message,
+    title: string,
+    streamers: Streamer[],
+    footer: string[] = [],
+): Promise<void> {
+    let buffer = `[= ${title} =]\n共 ${streamers.length} 个主播\n`;
+    const flush = async (): Promise<boolean> => {
+        if (!buffer) return true;
+        const sent = await sendReply(ctx, event, buffer);
+        buffer = '';
+        return sent;
+    };
+
+    for (let i = 0; i < streamers.length; i++) {
+        const streamer = streamers[i];
+        const status = streamer.liveStatus === 1 ? '直播中' : streamer.liveStatus === 2 ? '轮播中' : '未开播';
+        let block = `\n${i + 1}. ${streamer.uname}\n   UID: ${streamer.uid} | ${status}\n`;
+        if (streamer.liveStatus === 1 && streamer.liveTime > 0) {
+            block += `   已开播: ${Math.floor((Date.now() / 1000 - streamer.liveTime) / 60)} 分钟\n`;
+        }
+        block += `   https://live.bilibili.com/${streamer.roomId}\n`;
+        if (buffer.length + block.length > LIST_CHUNK_LIMIT && !await flush()) return;
+        buffer += block;
+    }
+
+    for (const line of footer) {
+        if (buffer.length + line.length + 1 > LIST_CHUNK_LIMIT && !await flush()) return;
+        buffer += line + '\n';
+    }
+    await flush();
+}
+
 /**
  * 处理查看订阅列表命令
  */
 async function handleList(
     ctx: NapCatPluginContext,
     event: OB11Message,
-    args: string[],
+    _args: string[],
 ): Promise<void> {
-    const showAll = args.includes('all') || args.includes('全部');
-
     if (event.message_type === 'group' && event.group_id) {
-        // 群订阅列表
         const groupId = String(event.group_id);
         const streamers = storage.getGroupSubscribedStreamers(groupId);
         const groupSub = storage.getGroupSub(groupId);
@@ -493,35 +573,11 @@ async function handleList(
             return;
         }
 
-        const lines = [
-            `[= 本群订阅列表 =]`,
-            `共 ${streamers.length} 个主播`,
-            ``,
-        ];
-
-        for (let i = 0; i < streamers.length; i++) {
-            const s = streamers[i];
-            const status = s.liveStatus === 1 ? '直播中' : s.liveStatus === 2 ? '轮播中' : '未开播';
-            lines.push(`${i + 1}. ${s.uname}`);
-            lines.push(`   UID: ${s.uid} | ${status}`);
-            if (s.liveStatus === 1 && s.liveTime > 0) {
-                const liveDuration = Math.floor((Date.now() / 1000 - s.liveTime) / 60);
-                lines.push(`   已开播: ${liveDuration} 分钟`);
-            }
-            lines.push(`   https://live.bilibili.com/${s.roomId}`);
-            lines.push('');
-        }
-
-        // 添加群设置信息
-        if (groupSub) {
-            lines.push(`[群设置]`);
-            lines.push(`@全体: ${groupSub.enableAtAll ? '开启' : '关闭'}`);
-        }
-
-        await sendReply(ctx, event, lines.join('\n'));
-
+        const footer = groupSub
+            ? ['[群设置]', `@全体: ${groupSub.enableAtAll ? '开启' : '关闭'}`]
+            : [];
+        await sendStreamerList(ctx, event, '本群订阅列表', streamers, footer);
     } else if (event.message_type === 'private' && event.user_id) {
-        // 用户个人订阅列表
         const userId = String(event.user_id);
         const streamers = storage.getUserSubscribedStreamers(userId);
 
@@ -530,26 +586,7 @@ async function handleList(
             return;
         }
 
-        const lines = [
-            `[= 您的订阅列表 =]`,
-            `共 ${streamers.length} 个主播`,
-            ``,
-        ];
-
-        for (let i = 0; i < streamers.length; i++) {
-            const s = streamers[i];
-            const status = s.liveStatus === 1 ? '直播中' : s.liveStatus === 2 ? '轮播中' : '未开播';
-            lines.push(`${i + 1}. ${s.uname}`);
-            lines.push(`   UID: ${s.uid} | ${status}`);
-            if (s.liveStatus === 1 && s.liveTime > 0) {
-                const liveDuration = Math.floor((Date.now() / 1000 - s.liveTime) / 60);
-                lines.push(`   已开播: ${liveDuration} 分钟`);
-            }
-            lines.push(`   https://live.bilibili.com/${s.roomId}`);
-            lines.push('');
-        }
-
-        await sendReply(ctx, event, lines.join('\n'));
+        await sendStreamerList(ctx, event, '您的订阅列表', streamers);
     }
 }
 

@@ -218,18 +218,35 @@ async function buildCardHtml(dynamic: DynamicInfo, uname: string): Promise<strin
 </html>`;
 }
 
-let renderInFlight = 0;
+const MAX_CONCURRENT_RENDERS = 2;
+let activeRenders = 0;
+const renderQueue: Array<() => void> = [];
+
+/** 获取渲染槽位；超出并发时等待释放，不丢弃本次渲染。 */
+async function acquireRenderSlot(): Promise<void> {
+    if (activeRenders < MAX_CONCURRENT_RENDERS) {
+        activeRenders += 1;
+        return;
+    }
+    // 槽位由释放方直接转交，等待期间不增加计数
+    await new Promise<void>(resolve => renderQueue.push(resolve));
+}
+
+function releaseRenderSlot(): void {
+    const next = renderQueue.shift();
+    if (next) next();
+    else activeRenders -= 1;
+}
 
 /**
  * 渲染动态卡片并返回可直接发送的 base64 图片地址。
- * 渲染失败、未启用或并发超限时返回 null，由调用方回退为文本推送。
+ * 未启用或渲染失败时返回 null，由调用方回退为文本推送。
  */
 export async function renderDynamicCard(dynamic: DynamicInfo, uname: string): Promise<string | null> {
     const config = pluginState.config;
     if (!config.renderDynamicCard) return null;
-    if (renderInFlight >= 2) return null;
 
-    renderInFlight += 1;
+    await acquireRenderSlot();
     try {
         const html = await buildCardHtml(dynamic, uname);
         const boundary = `----napcat-card-${Date.now().toString(16)}`;
@@ -267,6 +284,6 @@ export async function renderDynamicCard(dynamic: DynamicInfo, uname: string): Pr
         pluginState.logger.warn(`(；′⌒\`) 动态卡片渲染失败，回退文本: ${error instanceof Error ? error.message : String(error)}`);
         return null;
     } finally {
-        renderInFlight -= 1;
+        releaseRenderSlot();
     }
 }

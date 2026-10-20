@@ -21,98 +21,80 @@ const BILI_HEADERS = {
    
 };
 
-/**
- * 获取直播间状态（批量接口）
- * 通过B站API批量查询多个UP主的直播间状态信息
- * @param uids UP主UID数组
- * @returns Promise<Map<number, LiveRoomStatus>> 返回包含直播间状态的Map，key为UID
- */
-export async function getLiveRoomStatusBatch(uids: number[], signal?: AbortSignal): Promise<Map<number, LiveRoomStatus>> {
-    // 初始化结果Map，用于存储查询到的直播间状态
+/** 单次批量查询的 UID 数量上限，避免 URL 过长或超出接口限制。 */
+const LIVE_BATCH_SIZE = 50;
+
+interface RawLiveRoom {
+    room_id: number;
+    uid: number;
+    title: string;
+    live_status: number;
+    online: number;
+    live_time: number;
+    uname: string;
+    face: string;
+    cover_from_user: string;
+    area_id: number;
+    area_name: string;
+    area_v2_parent_name: string;
+    tag_name: string;
+}
+
+async function fetchLiveChunk(
+    uids: number[], signal?: AbortSignal,
+): Promise<Map<number, LiveRoomStatus>> {
     const result = new Map<number, LiveRoomStatus>();
+    const urlParams = uids.map(uid => `uids[]=${uid}`).join('&');
+    const response = await fetch(
+        `https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids?${urlParams}`,
+        { method: 'GET', signal: requestSignal(signal), headers: { ...BILI_HEADERS } },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-    // 如果传入的UID数组为空，直接返回空结果
-    if (uids.length === 0) return result;
-
-    try {
-        // 构造URL参数字符串
-        const urlParams = uids.map(uid => `uids[]=${uid}`).join('&');
-        const url = `https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids?${urlParams}`;
-
-
-        // 发起GET请求到B站API
-        const response = await fetch(url, {
-            method: 'GET',
-            signal: requestSignal(signal),
-            headers: {
-                ...BILI_HEADERS,  // 使用预定义的请求头
-            },
-        });
-
-        // 检查HTTP响应状态，非2xx状态码抛出错误
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-
-        // 解析响应JSON数据并进行类型断言
-        const data = await response.json() as ApiResponse<Record<string, {
-            room_id: number;           // 直播间ID
-            uid: number;              // UP主UID
-            title: string;            // 直播间标题
-            live_status: number;      // 直播状态(0=未开播,1=直播中,2=轮播中)
-            online: number;           // 在线人数
-            live_time: number;        // 开播时间戳
-            uname: string;            // 主播昵称
-            face: string;             // 主播头像URL
-            cover_from_user: string;  // 直播间封面
-            area_id: number;          // 分区ID
-            area_name: string;        // 分区名称
-            area_v2_parent_name: string; // 父分区名称
-            tag_name: string;         // 标签名称
-        }>>;
-
-        // 检查API返回的状态码，非0表示请求失败
-        if (data.code !== 0) {
-            throw new Error(`API Error: ${data.message}`);
-        }
-
-        // 遍历所有请求的UID，获取对应的直播间数据
-        for (const uid of uids) {
-            // 关键安全检查：确保data.data存在，避免访问undefined属性
-            if (!data.data) {
-                pluginState.logger.warn('(◕‿◕) API 返回数据为空');
-                return result;  // 数据为空时直接返回已收集的结果
-            }
-
-            // 从响应数据中获取当前UID对应的直播间信息
-            const roomData = data.data[String(uid)];
-
-            // 如果找到了对应的直播间数据，则将其转换为标准格式并存入结果Map
-            if (roomData) {
-                result.set(uid, {
-                    roomId: roomData.room_id,              // 直播间ID
-                    uid: roomData.uid,                     // UP主UID
-                    title: roomData.title,                 // 直播间标题
-                    liveStatus: roomData.live_status,      // 直播状态
-                    online: roomData.online,               // 在线人数
-                    liveTime: roomData.live_time,          // 开播时间
-                    uname: roomData.uname,                 // 主播名称
-                    face: roomData.face,                   // 主播头像
-                    cover: roomData.cover_from_user,       // 直播间封面
-                    areaId: roomData.area_id,              // 分区ID
-                    areaName: roomData.area_name,          // 分区名称
-                    parentAreaName: roomData.area_v2_parent_name, // 父分区名称
-                    tags: roomData.tag_name,               // 标签
-                });
-            }
-        }
-
-        // 输出详细日志
-        if (pluginState.config.debug) pluginState.logger.debug(`获取 ${result.size}/${uids.length} 个直播间状态`);
-    } catch (error) {
-        throw error;
+    const data = await response.json() as ApiResponse<Record<string, RawLiveRoom>>;
+    if (data.code !== 0) throw new Error(`API Error: ${data.message}`);
+    if (!data.data) {
+        pluginState.logger.warn('(◕‿◕) API 返回数据为空');
+        return result;
     }
-    // 返回最终的直播间状态结果
+
+    for (const uid of uids) {
+        const roomData = data.data[String(uid)];
+        if (!roomData) continue;
+        result.set(uid, {
+            roomId: roomData.room_id,
+            uid: roomData.uid,
+            title: roomData.title,
+            liveStatus: roomData.live_status,
+            online: roomData.online,
+            liveTime: roomData.live_time,
+            uname: roomData.uname,
+            face: roomData.face,
+            cover: roomData.cover_from_user,
+            areaId: roomData.area_id,
+            areaName: roomData.area_name,
+            parentAreaName: roomData.area_v2_parent_name,
+            tags: roomData.tag_name,
+        });
+    }
+    return result;
+}
+
+/**
+ * 获取直播间状态（批量接口）。
+ * 按固定大小分块请求，订阅量增长时不会因 URL 过长导致整轮检查失败。
+ */
+export async function getLiveRoomStatusBatch(
+    uids: number[], signal?: AbortSignal,
+): Promise<Map<number, LiveRoomStatus>> {
+    const result = new Map<number, LiveRoomStatus>();
+    for (let index = 0; index < uids.length; index += LIVE_BATCH_SIZE) {
+        const partial = await fetchLiveChunk(uids.slice(index, index + LIVE_BATCH_SIZE), signal);
+        for (const [uid, status] of partial) result.set(uid, status);
+    }
+    if (pluginState.config.debug) {
+        pluginState.logger.debug(`获取 ${result.size}/${uids.length} 个直播间状态`);
+    }
     return result;
 }
 
@@ -151,9 +133,12 @@ export async function getUserDynamics(
         for (const item of page.items) {
             if (ids.has(item.id_str)) continue;
             const dynamic = parseDynamicItem(item);
-            if (!dynamic) throw new Error(`动态 ${item.id_str} 解析失败`);
-            result.push(dynamic);
             ids.add(item.id_str);
+            if (!dynamic) {
+                pluginState.logger.warn(`(；′⌒\`) 跳过无法解析的动态 ${item.id_str}`);
+                continue;
+            }
+            result.push(dynamic);
         }
         if (pluginState.config.debug) pluginState.logger.debug(`获取用户 ${uid} 动态: 本页 ${page.items.length} 条`);
         const isKnown = (item: DynamicItemRaw) =>

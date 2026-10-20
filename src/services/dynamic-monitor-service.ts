@@ -37,10 +37,14 @@ const DYNAMIC_TYPE_NAMES: Record<DynamicType, string> = {
     DYNAMIC_TYPE_LIVE_RCMD: '直播推荐',
 };
 
-/** 需要跳过的动态类型（不推送） */
-const SKIP_DYNAMIC_TYPES: DynamicType[] = [
-    DynamicType.LIVE,       // 直播开播动态不推送（已有直播监控处理）
-    DynamicType.LIVE_RCMD,  // 直播推荐动态不推送（动态流中的直播卡片）
+/** 允许推送的动态类型；未知类型（PGC、商品、预约等）只记录不推送。 */
+const PUSHABLE_DYNAMIC_TYPES: DynamicType[] = [
+    DynamicType.FORWARD,
+    DynamicType.AV,
+    DynamicType.DRAW,
+    DynamicType.WORD,
+    DynamicType.ARTICLE,
+    DynamicType.MUSIC,
 ];
 
 export class DynamicMonitorService {
@@ -150,15 +154,18 @@ export class DynamicMonitorService {
         dynamics.sort((a, b) => a.author.pub_ts - b.author.pub_ts);
         let newest = latestTs;
         for (const dynamic of dynamics) {
+            if (signal?.aborted || !pluginState.config.enabled) return;
             if (seen.has(dynamic.id)) continue;
             seen.add(dynamic.id);
             // 早于已知边界的条目来自历史分页，只记录不推送
             if (dynamic.author.pub_ts <= latestTs) continue;
             newest = Math.max(newest, dynamic.author.pub_ts);
-            if (!SKIP_DYNAMIC_TYPES.includes(dynamic.type)) {
-                await this.enqueueDynamicNotification(uid, dynamic);
-                this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
-            }
+            if (!PUSHABLE_DYNAMIC_TYPES.includes(dynamic.type)) continue;
+            await this.enqueueDynamicNotification(uid, dynamic);
+            this.ctx.logger.info(`[新动态] ${streamer.uname}: ${DYNAMIC_TYPE_NAMES[dynamic.type] || '未知类型'}`);
+            // 逐条推进缓存，避免中途卸载后整批重推
+            this.dynamicCache.set(uid, { seenIds: [...seen].slice(-MAX_SEEN_IDS), latestTs: newest });
+            this.saveCache();
         }
         this.dynamicCache.set(uid, { seenIds: [...seen].slice(-MAX_SEEN_IDS), latestTs: newest });
         this.saveCache();
@@ -170,17 +177,18 @@ export class DynamicMonitorService {
         if (!streamer) return;
 
         const typeName = DYNAMIC_TYPE_NAMES[dynamic.type] || '动态';
+        const displayName = dynamic.author.name || streamer.uname;
         const id = `dynamic:${uid}:${dynamic.id}`;
-        const card = await renderDynamicCard(dynamic, streamer.uname);
+        const card = await renderDynamicCard(dynamic, displayName);
         if (card) {
             this.notificationService.enqueue(id, uid, {
-                text: `${streamer.uname} 发布了新${typeName}动态！`,
+                text: `${displayName} 发布了新${typeName}动态！`,
                 image: card,
             }, false);
             return;
         }
 
-        const message = this.buildDynamicMessage(streamer.uname, typeName, dynamic);
+        const message = this.buildDynamicMessage(displayName, typeName, dynamic);
 
         // 获取第一张图片（如果有）
         let image: string | undefined;

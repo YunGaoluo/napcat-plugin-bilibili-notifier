@@ -35,6 +35,9 @@ export function buildLiveStartMessage(uname: string, status: LiveRoomStatus): No
 
 /** 该主播的开播事件是否已经发出；未发出时交给下一轮轮询统一补发，避免重复。 */
 export function hasNotifiedLive(uid: number): boolean {
+    const current = getLiveMonitor();
+    if (current) return current.isKnownLive(uid);
+    // 无运行实例时（如测试直接构造服务）回退到持久化缓存
     const cache = pluginState.loadDataFile<Record<string, StreamerLiveCache>>(LIVE_CACHE_FILE, {});
     return cache[String(uid)]?.lastLiveStatus === 1;
 }
@@ -126,7 +129,18 @@ export class LiveMonitorService {
                 face: status.face, uname: status.uname,
             };
             this.processStreamerStatus(updated, status);
-            updates.push(updated);
+            // 仅在状态字段实际变化时写盘，避免每 10 秒全量重写 streamers.json
+            if (
+                updated.liveStatus !== streamer.liveStatus
+                || updated.liveTime !== streamer.liveTime
+                || updated.roomId !== streamer.roomId
+                || updated.title !== streamer.title
+                || updated.cover !== streamer.cover
+                || updated.face !== streamer.face
+                || updated.uname !== streamer.uname
+            ) {
+                updates.push(updated);
+            }
         }
         if (updates.length > 0) storage.setStreamers(updates);
         this.saveCache();
@@ -214,6 +228,11 @@ export class LiveMonitorService {
             data[uid] = cache;
         }
         pluginState.saveDataFile(LIVE_CACHE_FILE, data);
+    }
+
+    /** 该主播在当前运行实例中是否已被标记为直播中。 */
+    isKnownLive(uid: number): boolean {
+        return this.liveCache.get(uid)?.lastLiveStatus === 1;
     }
 
     /** 取消订阅后立即丢弃该主播的直播状态，避免重新订阅时沿用旧状态。 */

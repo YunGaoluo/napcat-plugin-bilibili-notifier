@@ -19,18 +19,61 @@ interface PendingNotification {
     message: NotificationMessage;
     atAll: boolean;
     targets: string[];
+    /** 入队时间，用于过期清理。 */
+    createdAt: number;
 }
+
+/** 未送达事件的最长保留时间，避免暂停群长期积压。 */
+const QUEUE_TTL_MS = 24 * 60 * 60 * 1000;
+/** 队列事件数量上限，超出时丢弃最旧的事件。 */
+const MAX_PENDING_EVENTS = 200;
+/** 连续发送之间的间隔，降低触发 QQ 风控的概率。 */
+const SEND_INTERVAL_MS = 250;
+/** 失败目标的重试退避：1s、2s、4s… 最长 60s。 */
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 60000;
 
 export class NotificationService {
     private ctx: NapCatPluginContext;
     private pending: Map<string, PendingNotification>;
     private flushing: Promise<void> | null = null;
+    private retryState = new Map<string, { attempts: number; nextAt: number }>();
 
     constructor(ctx: NapCatPluginContext) {
         this.ctx = ctx;
-        this.pending = new Map(Object.entries(
-            pluginState.loadDataFile<Record<string, PendingNotification>>('notification_queue.json', {})
-        ));
+        const stored = pluginState.loadDataFile<Record<string, PendingNotification>>('notification_queue.json', {});
+        this.pending = new Map();
+        const now = Date.now();
+        for (const [id, entry] of Object.entries(stored)) {
+            if (!entry || !Array.isArray(entry.targets)) continue;
+            this.pending.set(id, {
+                ...entry,
+                createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : now,
+            });
+        }
+        if (this.prunePending()) this.save();
+    }
+
+    /** 清理过期与超量事件，返回是否发生变化。 */
+    private prunePending(): boolean {
+        const now = Date.now();
+        let changed = false;
+        for (const [id, entry] of this.pending) {
+            if (now - entry.createdAt > QUEUE_TTL_MS) {
+                this.pending.delete(id);
+                changed = true;
+            }
+        }
+        if (this.pending.size > MAX_PENDING_EVENTS) {
+            const overflow = [...this.pending.entries()]
+                .sort((a, b) => a[1].createdAt - b[1].createdAt)
+                .slice(0, this.pending.size - MAX_PENDING_EVENTS);
+            for (const [id] of overflow) {
+                this.pending.delete(id);
+                changed = true;
+            }
+        }
+        return changed;
     }
 
     /**
@@ -44,13 +87,28 @@ export class NotificationService {
             ...storage.getStreamerSubscribedUsers(uid).map(user => `private:${user.userId}`),
         ];
         if (resolved.length === 0) return;
-        this.pending.set(id, { uid, message, atAll, targets: resolved });
+        this.pending.set(id, { uid, message, atAll, targets: resolved, createdAt: Date.now() });
+        this.prunePending();
         try {
             this.save();
         } catch (error) {
             this.pending.delete(id);
             throw error;
         }
+    }
+
+    /** 将目标并入已存在的待发事件；事件不存在或已包含目标时返回 false。 */
+    addTarget(id: string, target: string): boolean {
+        const entry = this.pending.get(id);
+        if (!entry || entry.targets.includes(target)) return false;
+        entry.targets.push(target);
+        try {
+            this.save();
+        } catch (error) {
+            entry.targets.pop();
+            throw error;
+        }
+        return true;
     }
 
     /** 两种监控共享一个发送任务，失败目标留到下一轮，成功目标立即落盘。 */
@@ -66,6 +124,11 @@ export class NotificationService {
             for (const target of [...entry.targets]) {
                 if (signal?.aborted || !pluginState.config.enabled) return;
                 if (blockedTargets.has(target)) continue;
+                const retry = this.retryState.get(target);
+                if (retry && retry.nextAt > Date.now()) {
+                    blockedTargets.add(target);
+                    continue;
+                }
                 const separator = target.indexOf(':');
                 const kind = target.slice(0, separator);
                 const targetId = target.slice(separator + 1);
@@ -79,18 +142,43 @@ export class NotificationService {
                 }
                 if (group && (!group.enabled || !pluginState.isGroupEnabled(targetId))) continue;
                 const segments = this.buildMessageSegments(entry.message, !!group && entry.atAll && group.enableAtAll);
+                await this.throttle(signal);
                 try {
                     if (kind === 'group') await this.sendToGroup(targetId, segments);
                     else await this.sendToUser(targetId, segments);
                 } catch (error) {
+                    const attempts = (retry?.attempts ?? 0) + 1;
+                    this.retryState.set(target, {
+                        attempts,
+                        nextAt: Date.now() + Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempts - 1)),
+                    });
                     blockedTargets.add(target);
                     this.ctx.logger.error(`发送通知到 ${target} 失败，保留待重试:`, error);
                     continue;
                 }
+                this.retryState.delete(target);
                 this.acknowledge(id, entry, target);
                 if (pluginState.config.debug) this.ctx.logger.debug(`通知已发送到 ${target}`);
             }
         }
+    }
+
+    /** 控制发送节奏；中止信号生效时立即结束等待。 */
+    private async throttle(signal?: AbortSignal): Promise<void> {
+        if (SEND_INTERVAL_MS <= 0) return;
+        await new Promise<void>((resolve, reject) => {
+            let timer: NodeJS.Timeout;
+            const onAbort = () => {
+                clearTimeout(timer);
+                reject(signal?.reason instanceof Error ? signal.reason : new Error('aborted'));
+            };
+            timer = setTimeout(() => {
+                signal?.removeEventListener('abort', onAbort);
+                resolve();
+            }, SEND_INTERVAL_MS);
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener('abort', onAbort, { once: true });
+        });
     }
 
     private acknowledge(id: string, entry: PendingNotification, target: string): void {

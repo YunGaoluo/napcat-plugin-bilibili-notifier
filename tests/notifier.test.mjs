@@ -209,6 +209,7 @@ test('a failing recipient does not receive later events before the earlier event
     assert.deepEqual(delivered.map(text), ['first', 'second']);
     assert.deepEqual(sent.filter(params => params.group_id === '100').map(text), ['first']);
     sendAction = undefined;
+    await new Promise(resolve => setTimeout(resolve, 1100));
     await notifier.flush();
     assert.deepEqual(delivered.filter(params => params.group_id === '100').map(text), ['first', 'second']);
 });
@@ -339,6 +340,7 @@ test('a new post does not drag older pagination pages into the push', async () =
 
 test('dynamic push renders one card image preceded by a short header', async () => {
     seed();
+    storage.setStreamer({ ...storage.getStreamer(uid), uname: '旧名字' });
     pluginState.updateConfig({ renderDynamicCard: true, gotenbergUrl: 'http://gotenberg.test', cardWidth: 600 });
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
     fetchAction = async url => {
@@ -400,6 +402,98 @@ test('dynamic API failures do not advance the baseline; live cards remain suppre
     pages[''] = { items: [dynamic('new', 200), dynamic('live', 201, 'DYNAMIC_TYPE_LIVE_RCMD'), dynamic('old', 100)] };
     await checkDynamic(monitor);
     assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)[1]), ['new']);
+});
+
+test('expired notification queue entries are pruned on load', () => {
+    pluginState.saveDataFile('notification_queue.json', {
+        stale: {
+            uid,
+            message: { text: 'stale' },
+            atAll: false,
+            targets: ['group:100'],
+            createdAt: Date.now() - 25 * 60 * 60 * 1000,
+        },
+    });
+    clearNotificationService();
+    createNotificationService(ctx);
+    assert.deepEqual(queue(), {});
+});
+
+test('malformed and unsupported dynamics are skipped without aborting the round', async () => {
+    seed();
+    const monitor = new DynamicMonitorService(ctx);
+    monitors.push(monitor);
+    await checkDynamic(monitor);
+
+    const future = Math.floor(Date.now() / 1000) + 1;
+    pages[''] = {
+        items: [
+            { id_str: 'broken', type: 'DYNAMIC_TYPE_WORD', modules: [] },
+            dynamic('pgc', future, 'DYNAMIC_TYPE_PGC'),
+            dynamic('good', future + 1),
+        ],
+    };
+    await checkDynamic(monitor);
+    assert.deepEqual(delivered.map(text).map(value => value.match(/content (\S+)/)?.[1] ?? text(value)),
+        ['good']);
+});
+
+test('live status batch requests are split into bounded chunks', async () => {
+    requests.length = 0;
+    const uids = Array.from({ length: 120 }, (_, index) => index + 1);
+    await getLiveRoomStatusBatch(uids);
+    assert.deepEqual(
+        requests.map(request => request.url.searchParams.getAll('uids[]').length),
+        [50, 50, 20],
+    );
+});
+
+test('unchanged live status does not rewrite streamers.json', async () => {
+    seed();
+    const monitor = await pollLive();
+    const file = path.join(ctx.dataPath, 'streamers.json');
+    const before = fs.readFileSync(file, 'utf8');
+    await monitor.checkAllStreamers();
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+});
+
+test('per-group subscription cap blocks new streamers', async () => {
+    seed(['100']);
+    for (let index = 1; index <= 49; index += 1) {
+        const streamerUid = 1000 + index;
+        storage.setStreamer({ uid: streamerUid, roomId: streamerUid, uname: `UP${index}`, liveStatus: 0, liveTime: 0 });
+        storage.subscribeGroup('100', streamerUid);
+    }
+    storage.setStreamer({ uid: 2000, roomId: 2000, uname: 'Overflow', liveStatus: 0, liveTime: 0 });
+    assert.equal(storage.getGroupSub('100').streamerUids.length, 50);
+
+    await handleMessage(ctx, groupEvent('#blive 订阅 UID:2000'));
+    assert.match(text(sent.at(-1)), /上限/);
+    assert.equal(storage.getGroupSub('100').streamerUids.includes(2000), false);
+});
+
+test('subscribe commands are rate limited per conversation', async () => {
+    seed(['100']);
+    storage.setStreamer({ uid: 43, roomId: 143, uname: 'UP43', liveStatus: 0, liveTime: 0 });
+    await handleMessage(ctx, groupEvent('#blive 订阅 UID:43'));
+    assert.match(text(sent.at(-1)), /群订阅成功/);
+    await handleMessage(ctx, groupEvent('#blive 订阅 UID:42'));
+    assert.match(text(sent.at(-1)), /操作过于频繁/);
+});
+
+test('long subscription lists are split across messages', async () => {
+    seed(['100']);
+    for (let index = 1; index <= 49; index += 1) {
+        const streamerUid = 1000 + index;
+        storage.setStreamer({
+            uid: streamerUid, roomId: streamerUid,
+            uname: '很长的测试主播名称'.repeat(6), liveStatus: 0, liveTime: 0,
+        });
+        storage.subscribeGroup('100', streamerUid);
+    }
+    await handleMessage(ctx, groupEvent('#blive 列表'));
+    assert.ok(sent.length > 1);
+    for (const params of sent) assert.ok(text(params).length <= 3000);
 });
 
 test('invalid repeated pagination cursor fails rather than silently skipping backlog', async () => {
